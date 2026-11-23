@@ -11,8 +11,15 @@ public struct DigestBuilder: Sendable {
 
     /// The 30-day window is `[now - 30d, now]`, inclusive on both ends; messages dated after
     /// `now` count toward all-time only. Handles that normalize equally are merged.
-    public func build(records: [MessageRecord], now: Date) -> InteractionDigest {
-        let windowStart = now.addingTimeInterval(-30 * 24 * 60 * 60)
+    ///
+    /// `excerpts` is nil unless the user opted in to message text (`--with-messages`); then every
+    /// entry gets `recentMessages`: excerpts in the same window, newest first, at most
+    /// `MessageExcerptPolicy.maxPerHandle`, each at most `MessageExcerptPolicy.maxCharacters`.
+    /// With nil, the output is metadata only (`recentMessages` stays nil).
+    public func build(records: [MessageRecord], excerpts: [MessageExcerpt]? = nil, now: Date)
+        -> InteractionDigest
+    {
+        let windowStart = now.addingTimeInterval(-MessageExcerptPolicy.window)
 
         struct Acc {
             var lastMe: Date?
@@ -34,15 +41,43 @@ public struct DigestBuilder: Sendable {
             byHandle[key] = a
         }
 
+        let recent = excerpts.map { recentMessages($0, windowStart: windowStart, now: now) }
+
         let entries = byHandle.map { handle, a -> InteractionDigest.Entry in
             let last = [a.lastMe, a.lastThem].compactMap { $0 }.max()
             let awaiting = a.lastThem.map { them in a.lastMe.map { them > $0 } ?? true } ?? false
             return InteractionDigest.Entry(
                 handle: handle, lastMessageAt: last, lastFromMeAt: a.lastMe,
                 lastFromThemAt: a.lastThem, messagesLast30Days: a.last30,
-                messagesAllTime: a.all, awaitingMyReply: awaiting)
+                messagesAllTime: a.all, awaitingMyReply: awaiting,
+                recentMessages: recent.map { $0[handle] ?? [] })
         }.sorted { $0.handle < $1.handle }
 
         return InteractionDigest(generatedAt: now, entries: entries)
+    }
+
+    /// Bounded excerpts per normalized handle. Input is in chat.db `ROWID` order, so ordering by
+    /// (date desc, input index desc) puts the later row first when two messages share a timestamp.
+    func recentMessages(_ excerpts: [MessageExcerpt], windowStart: Date, now: Date)
+        -> [String: [InteractionDigest.DigestMessage]]
+    {
+        var byHandle: [String: [(index: Int, excerpt: MessageExcerpt)]] = [:]
+        for (index, e) in excerpts.enumerated() where e.date >= windowStart && e.date <= now {
+            byHandle[normalizer.normalize(e.handle), default: []].append((index, e))
+        }
+        return byHandle.mapValues { list in
+            Array(
+                list.sorted { a, b in
+                    a.excerpt.date != b.excerpt.date ? a.excerpt.date > b.excerpt.date : a.index > b.index
+                }
+                .lazy
+                .compactMap { item in
+                    let e = item.excerpt
+                    return MessageExcerptPolicy.excerptText(e.text).map {
+                        InteractionDigest.DigestMessage(date: e.date, fromMe: e.isFromMe, text: $0)
+                    }
+                }
+                .prefix(MessageExcerptPolicy.maxPerHandle))
+        }
     }
 }

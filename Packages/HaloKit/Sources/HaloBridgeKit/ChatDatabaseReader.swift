@@ -23,9 +23,10 @@ public enum ChatDatabaseError: Error, CustomStringConvertible, Equatable {
 /// Reads message metadata from chat.db.
 ///
 /// Privacy: the original file is never opened by SQLite. It is copied (with its -wal/-shm
-/// sidecars) into a private temp directory, and that snapshot is opened read-only. Only
-/// `handle.id`, `message.is_from_me` and `message.date` are ever selected; `text` and
-/// `attributedBody` are never referenced. v1 covers 1:1 chats only: chats whose
+/// sidecars) into a private temp directory, and that snapshot is opened read-only.
+/// `messageRecords()` selects only `handle.id`, `message.is_from_me` and `message.date`.
+/// `text` and `attributedBody` are read only by `recentMessageExcerpts(since:)`, which runs only
+/// when the user opts in (`--with-messages`). v1 covers 1:1 chats only: chats whose
 /// `chat_handle_join` has exactly one handle. Group chats are excluded.
 ///
 /// Tapbacks/reactions (`associated_message_type != 0`) are excluded when the schema has that
@@ -154,28 +155,34 @@ public final class ChatDatabaseReader: Sendable {
         return .unreadable(error.localizedDescription)
     }
 
+    /// SQL shared by both queries: 1:1 chats only, tapbacks excluded when the column exists.
+    static func oneToOneQuery(_ db: Database, columns: String, extraFilter: String = "") throws -> String {
+        let hasTapbackColumn = try db.columns(in: "message").contains {
+            $0.name.lowercased() == "associated_message_type"
+        }
+        let tapbackFilter =
+            hasTapbackColumn
+            ? "AND (m.associated_message_type IS NULL OR m.associated_message_type = 0)" : ""
+        return """
+            SELECT h.id AS handle, m.is_from_me AS is_from_me, m.date AS date\(columns)
+            FROM message m
+            JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
+            JOIN chat_handle_join chj ON chj.chat_id = cmj.chat_id
+            JOIN handle h ON h.ROWID = chj.handle_id
+            WHERE cmj.chat_id IN (
+                SELECT chat_id FROM chat_handle_join GROUP BY chat_id HAVING COUNT(*) = 1
+            )
+            \(tapbackFilter)
+            \(extraFilter)
+            """
+    }
+
     /// Metadata for every message in a 1:1 chat.
     public func messageRecords() throws -> [MessageRecord] {
         do {
             return try queue.read { db in
-                let hasTapbackColumn = try db.columns(in: "message").contains {
-                    $0.name.lowercased() == "associated_message_type"
-                }
-                let tapbackFilter =
-                    hasTapbackColumn
-                    ? "AND (m.associated_message_type IS NULL OR m.associated_message_type = 0)" : ""
-                let sql = """
-                    SELECT h.id AS handle, m.is_from_me AS is_from_me, m.date AS date
-                    FROM message m
-                    JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
-                    JOIN chat_handle_join chj ON chj.chat_id = cmj.chat_id
-                    JOIN handle h ON h.ROWID = chj.handle_id
-                    WHERE cmj.chat_id IN (
-                        SELECT chat_id FROM chat_handle_join GROUP BY chat_id HAVING COUNT(*) = 1
-                    )
-                    \(tapbackFilter)
-                    """
-                return try Row.fetchAll(db, sql: sql).compactMap { row -> MessageRecord? in
+                try Row.fetchAll(db, sql: try Self.oneToOneQuery(db, columns: "")).compactMap {
+                    row -> MessageRecord? in
                     guard let handle: String = row["handle"], let date: Int64 = row["date"] else {
                         return nil
                     }
@@ -186,6 +193,61 @@ public final class ChatDatabaseReader: Sendable {
             }
         } catch {
             throw Self.map(error, path: "chat.db")
+        }
+    }
+
+    /// Text of 1:1 messages dated at or after `since` (OPT-IN ONLY: `--with-messages`).
+    ///
+    /// Uses `message.text` when it is readable, else decodes `attributedBody` with
+    /// `TypedStreamDecoder`. Messages with no readable text (attachment-only, undecodable) are
+    /// skipped; text is cleaned and cut to `MessageExcerptPolicy.maxCharacters`. Rows come back in
+    /// `ROWID` order. MESSAGE CONTENT (invariant 6): the result is never logged.
+    public func recentMessageExcerpts(since: Date) throws -> [MessageExcerpt] {
+        // Pre-filter in SQL so old bodies are never loaded. chat.db mixes Apple-epoch seconds and
+        // nanoseconds (see `AppleDate`); this keeps every row that could be in range, and the
+        // exact `>= since` check happens after conversion.
+        let sinceSeconds = Int64((since.timeIntervalSince1970 - AppleDate.appleEpochOffset).rounded(.down))
+        let (sinceNanos, overflow) = sinceSeconds.multipliedReportingOverflow(by: 1_000_000_000)
+        let filter = "AND (m.date >= ? OR (m.date < 100000000000 AND m.date >= ?)) ORDER BY m.ROWID"
+        do {
+            return try queue.read { db in
+                let sql = try Self.oneToOneQuery(
+                    db, columns: ", m.text AS text, m.attributedBody AS body", extraFilter: filter)
+                let args: StatementArguments = [overflow ? Int64.max : sinceNanos, sinceSeconds]
+                return try Row.fetchAll(db, sql: sql, arguments: args).compactMap(Self.excerpt(since: since))
+            }
+        } catch {
+            throw Self.map(error, path: "chat.db")
+        }
+    }
+
+    /// Maps one row to an excerpt. Columns are read through `DatabaseValue` storage so an
+    /// unexpected column type yields nil instead of trapping in a typed GRDB subscript.
+    static func excerpt(since: Date) -> (Row) -> MessageExcerpt? {
+        { row in
+            guard case .string(let handle) = (row["handle"] as DatabaseValue).storage,
+                case .int64(let raw) = (row["date"] as DatabaseValue).storage
+            else { return nil }
+            let date = AppleDate.convert(raw)
+            guard date >= since else { return nil }
+            let text: String?
+            switch (row["text"] as DatabaseValue).storage {
+            case .string(let s): text = s
+            case .blob(let d): text = String(data: d, encoding: .utf8)
+            default: text = nil
+            }
+            let body: Data?
+            if case .blob(let d) = (row["body"] as DatabaseValue).storage { body = d } else { body = nil }
+            guard let excerpt = MessageExcerptPolicy.messageText(text: text, attributedBody: body) else {
+                return nil
+            }
+            let fromMe: Bool
+            if case .int64(let v) = (row["is_from_me"] as DatabaseValue).storage {
+                fromMe = v != 0
+            } else {
+                fromMe = false
+            }
+            return MessageExcerpt(handle: handle, isFromMe: fromMe, date: date, text: excerpt)
         }
     }
 }

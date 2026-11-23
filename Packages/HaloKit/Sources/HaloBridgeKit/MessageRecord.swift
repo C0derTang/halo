@@ -21,7 +21,7 @@ public enum AppleDate {
     /// Second values stay below 1e11 for thousands of years; nanosecond values are above it
     /// after the first ~100 seconds past 2001.
     public static func convert(_ raw: Int64) -> Date {
-        let seconds = abs(raw) >= 100_000_000_000 ? Double(raw) / 1_000_000_000 : Double(raw)
+        let seconds = raw.magnitude >= 100_000_000_000 ? Double(raw) / 1_000_000_000 : Double(raw)
         return Date(timeIntervalSince1970: appleEpochOffset + seconds)
     }
 }

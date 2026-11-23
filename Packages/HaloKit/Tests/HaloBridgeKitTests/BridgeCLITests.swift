@@ -212,4 +212,124 @@ import Testing
         #expect(r.code == 1)
         #expect(!FileManager.default.fileExists(atPath: "/tmp/never.halodigest"))
     }
+
+    // MARK: --with-messages (issue #57)
+
+    static let bodyText = "SYNTHETIC-BODY-TEXT 🎈"
+
+    /// Alice: 25 recent typedstream-body messages, one 40 days old, one 700 characters long.
+    func messagesFixture() throws -> SyntheticChatDB {
+        let db = try SyntheticChatDB(tapbackColumn: true)
+        let alice = try db.addHandle("alice@example.com")
+        let bob = try db.addHandle("bob@example.com")
+        let a = try db.addChat(handles: [alice])
+        let b = try db.addChat(handles: [bob])
+        for i in 0..<25 {
+            try db.addBodyMessage(
+                chat: a, handle: alice, fromMe: i % 2 == 0, at: now.addingTimeInterval(-Double(i + 1) * 3600),
+                "\(Self.bodyText) #\(i)")
+        }
+        try db.addBodyMessage(
+            chat: a, handle: alice, fromMe: false, at: now.addingTimeInterval(-40 * 86_400), "OLD-MESSAGE")
+        try db.addBodyMessage(
+            chat: b, handle: bob, fromMe: false, at: now.addingTimeInterval(-60),
+            String(repeating: "L", count: 700))
+        try db.addTapback(chat: b, handle: bob, fromMe: true, at: now.addingTimeInterval(-30))
+        return db
+    }
+
+    func paired() throws -> (InMemoryKeyStore, PairingKey) {
+        let store = InMemoryKeyStore()
+        let phone = PairingKey(privateKey: Curve25519.KeyAgreement.PrivateKey())
+        try PairedPhone.save(phone.payload, in: store)
+        return (store, phone)
+    }
+
+    static let nowFlag = ["--now", "2027-01-15T08:00:00Z"]
+
+    func lines(_ r: Run) -> String { (r.out + r.err).joined(separator: "\n") }
+
+    @Test func exportWithoutFlagHasNoMessageText() throws {
+        let db = try messagesFixture()
+        let (store, phone) = try paired()
+        let out = db.dir.appendingPathComponent("plain.halodigest")
+        let r = run(
+            ["export", "--db", db.url.path, "--out", out.path, "--now", "2027-01-15T08:00:00Z"], store: store)
+        #expect(r.code == 0, "\(r.err)")
+        #expect(!lines(r).contains("--with-messages"))
+        #expect(!lines(r).contains("message excerpts"))
+        let digest = try DigestEnvelope.open(try Data(contentsOf: out), with: phone).digest
+        #expect(digest.entries.allSatisfy { $0.recentMessages == nil })
+        let json = String(decoding: try DigestCoding.encoder().encode(digest), as: UTF8.self)
+        #expect(!json.contains("recentMessages"))
+        #expect(!json.contains("SYNTHETIC-BODY-TEXT"))
+    }
+
+    @Test func exportWithMessagesSealsBoundedExcerpts() throws {
+        #expect(ISO8601DateFormatter().date(from: "2027-01-15T08:00:00Z") == now)
+        let db = try messagesFixture()
+        let (store, phone) = try paired()
+        let out = db.dir.appendingPathComponent("msgs.halodigest")
+        let r = run(
+            ["export", "--with-messages", "--db", db.url.path, "--out", out.path] + Self.nowFlag, store: store
+        )
+        #expect(r.code == 0, "\(r.err)")
+        // A clear notice, and never the text itself.
+        #expect(r.err.contains { $0.contains("--with-messages") && $0.contains("message TEXT") })
+        #expect(r.out.first?.contains("with message excerpts") == true)
+        #expect(!lines(r).contains("SYNTHETIC-BODY-TEXT"))
+        #expect(!lines(r).contains("LLLL"))
+
+        // Text exists only inside the envelope; no temp file is left behind.
+        let sealed = try Data(contentsOf: out)
+        #expect(sealed.range(of: Data("SYNTHETIC-BODY-TEXT".utf8)) == nil)
+        #expect(sealed.range(of: Data("LLLL".utf8)) == nil)
+        let leftovers = try FileManager.default.contentsOfDirectory(atPath: db.dir.path)
+            .filter { $0.hasPrefix(SecureFileWriter.tempPrefix) }
+        #expect(leftovers.isEmpty)
+
+        let digest = try DigestEnvelope.open(sealed, with: phone).digest
+        #expect(digest.version == InteractionDigest.currentVersion)
+        let alice = try #require(digest.entries.first { $0.handle == "alice@example.com" }?.recentMessages)
+        #expect(alice.count == MessageExcerptPolicy.maxPerHandle)
+        #expect(alice.map(\.text) == (0..<20).map { "\(Self.bodyText) #\($0)" })
+        #expect(alice.map(\.fromMe) == (0..<20).map { $0 % 2 == 0 })
+        #expect(!alice.contains { $0.text == "OLD-MESSAGE" })
+        let bob = try #require(digest.entries.first { $0.handle == "bob@example.com" }?.recentMessages)
+        #expect(bob.map(\.text) == [String(repeating: "L", count: MessageExcerptPolicy.maxCharacters)])
+    }
+
+    @Test func plaintextDigestRefusesMessagesWithoutAcknowledgement() throws {
+        let db = try messagesFixture()
+        let out = db.dir.appendingPathComponent("digest.json")
+        let r = run(
+            ["digest", "--plaintext", "--with-messages", "--db", db.url.path, "--out", out.path],
+            store: InMemoryKeyStore())
+        #expect(r.code == 64)
+        #expect(r.err.first?.contains("--i-understand-plaintext") == true)
+        #expect(!FileManager.default.fileExists(atPath: out.path))
+        // The acknowledgement belongs to the debug command only.
+        let e = run(
+            ["export", "--with-messages", "--i-understand-plaintext", "--out", "x.halodigest"],
+            store: InMemoryKeyStore())
+        #expect(e.code == 64)
+    }
+
+    @Test func plaintextDigestWithAcknowledgementIncludesText() throws {
+        let db = try messagesFixture()
+        let out = db.dir.appendingPathComponent("digest.json")
+        let r = run(
+            [
+                "digest", "--plaintext", "--with-messages", "--i-understand-plaintext", "--db", db.url.path,
+                "--out", out.path,
+            ] + Self.nowFlag, store: InMemoryKeyStore())
+        #expect(r.code == 0, "\(r.err)")
+        #expect(r.err.contains { $0.contains("UNENCRYPTED") && $0.contains("message TEXT") })
+        #expect(!lines(r).contains("SYNTHETIC-BODY-TEXT"))
+        let digest = try DigestCoding.decoder().decode(
+            InteractionDigest.self, from: try Data(contentsOf: out))
+        #expect(digest.entries.allSatisfy { $0.recentMessages != nil })
+        let perms = try FileManager.default.attributesOfItem(atPath: out.path)[.posixPermissions] as? Int
+        #expect(perms == 0o600)
+    }
 }
