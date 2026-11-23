@@ -5,7 +5,7 @@ import HaloCore
 /// Clusters unlabeled face embeddings for the enrollment triage UI.
 ///
 /// Algorithm: Chinese Whispers over a thresholded cosine-similarity graph. Similarities are
-/// computed in blocks with BLAS (`cblas_sgemm`), keeping each face's `maxNeighbors` strongest links
+/// computed in blocks with BLAS (`vDSP_mmul` against a pre-transposed matrix), keeping each face's `maxNeighbors` strongest links
 /// at or above the threshold, so memory is O(n * maxNeighbors) rather than O(n^2).
 /// Determinism: faces are sorted by id, label updates run in that fixed order, and ties break
 /// toward the smallest label, so output is independent of input order and RNG-free.
@@ -199,16 +199,24 @@ public struct FaceClusterer: Sendable {
     private func buildGraph(flat: [Float], n: Int, dim: Int) -> [[(Int, Float)]] {
         let blockRows = max(1, min(n, 4_000_000 / max(n, 1)))
         var sims = [Float](repeating: 0, count: blockRows * n)
+        // Transpose once: (n x dim) -> (dim x n), so each block is a plain row-major product.
+        var transposed = [Float](repeating: 0, count: n * dim)
+        flat.withUnsafeBufferPointer { src in
+            transposed.withUnsafeMutableBufferPointer { dst in
+                vDSP_mtrans(src.baseAddress!, 1, dst.baseAddress!, 1, vDSP_Length(dim), vDSP_Length(n))
+            }
+        }
         var edgeSets = [[Int: Float]](repeating: [:], count: n)
         var start = 0
         while start < n {
             let rows = min(blockRows, n - start)
             flat.withUnsafeBufferPointer { all in
-                sims.withUnsafeMutableBufferPointer { c in
-                    cblas_sgemm(
-                        CblasRowMajor, CblasNoTrans, CblasTrans, Int32(rows), Int32(n), Int32(dim), 1,
-                        all.baseAddress! + start * dim, Int32(dim), all.baseAddress!, Int32(dim), 0,
-                        c.baseAddress!, Int32(n))
+                transposed.withUnsafeBufferPointer { bt in
+                    sims.withUnsafeMutableBufferPointer { c in
+                        vDSP_mmul(
+                            all.baseAddress! + start * dim, 1, bt.baseAddress!, 1, c.baseAddress!, 1,
+                            vDSP_Length(rows), vDSP_Length(n), vDSP_Length(dim))
+                    }
                 }
             }
             for r in 0..<rows {

@@ -278,14 +278,14 @@ private func assignFixture() throws -> ([FaceEmbedding], ClusteringResult, [[Flo
 
 @Test func assignInvalidCentroidThrows() throws {
     var g = LCG(state: 80)
-    var (initial, base, cs) = try assignFixture()
+    let (initial, fixtureBase, cs) = try assignFixture()
+    var base = fixtureBase
     base.clusters[0].centroid = [1, 0]
     let new = sample(cs[0], noise: 0.2, g: &g)
     #expect(throws: ClusteringError.invalidCluster(id: base.clusters[0].id)) {
         try FaceClusterer().assign(
             newEmbeddings: [new], to: base.clusters, existingEmbeddings: initial)
     }
-    initial.removeAll()
 }
 
 @Test func assignDropsLowQualityNewFaces() throws {
