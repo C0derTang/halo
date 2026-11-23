@@ -91,7 +91,8 @@ import Testing
         }
         #expect(!store.hasPendingErasure)
         #expect(Fixture.rawTraces(of: needles, at: path) == [])
-        #expect(try await store.appliedMigrations() == ["v1", "v2", "v4_memoryHooks"])  // schema survives
+        // Schema survives.
+        #expect(try await store.appliedMigrations() == ["v1", "v2", "v3_faceBox", "v4_memoryHooks"])
 
         // Still usable afterwards, and the erasure holds across a reopen.
         try await store.upsert(Fixture.person("Fresh Start", confirmed: true))

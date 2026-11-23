@@ -130,10 +130,16 @@ enum RowDecoding {
         }
         let ownerString: String? = row["personId"]
         let owner: PersonID? = ownerString == nil ? nil : try personID(row, "personId", table: table)
+        var faceBox: CGRect?
+        if let x: Double = row["faceBoxX"], let y: Double = row["faceBoxY"],
+            let width: Double = row["faceBoxWidth"], let height: Double = row["faceBoxHeight"]
+        {
+            faceBox = CGRect(x: x, y: y, width: width, height: height)
+        }
         return FaceEmbedding(
             id: id, personID: owner, space: space, vector: vector, source: source,
             sourceRef: row["sourceRef"], quality: Float(row["quality"] as Double),
-            createdAt: Date(storedValue: row["createdAt"]))
+            createdAt: Date(storedValue: row["createdAt"]), faceBox: faceBox)
     }
 
     static func memoryHook(_ row: Row) throws -> MemoryHook {

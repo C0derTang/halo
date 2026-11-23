@@ -45,6 +45,9 @@ import Testing
         await #expect(throws: PeopleStoreError.unknownPerson(ghost)) {
             try await store.addHook(Self.hook(ghost, "orphan"))
         }
+        await #expect(throws: PeopleStoreError.unknownPerson(ghost)) {
+            try await store.replaceHooks(for: ghost, source: .userNote, with: [])
+        }
         let hook = Self.hook(person.id, "once")
         try await store.addHook(hook)
         await #expect(throws: (any Error).self) { try await store.addHook(hook) }

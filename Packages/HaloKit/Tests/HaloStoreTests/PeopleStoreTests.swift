@@ -7,7 +7,7 @@ import Testing
 @Suite struct SchemaTests {
     @Test func migrationsRunOnFreshInMemoryDatabase() async throws {
         let store = try PeopleStore.inMemory()
-        #expect(try await store.appliedMigrations() == ["v1", "v2", "v4_memoryHooks"])
+        #expect(try await store.appliedMigrations() == ["v1", "v2", "v3_faceBox", "v4_memoryHooks"])
         #expect(
             try await store.userTables() == [
                 "cluster", "cluster_member", "digest", "embedding", "identity", "memory_hook", "person",
@@ -22,11 +22,11 @@ import Testing
         let person = Fixture.person("Reopen Test", confirmed: true)
         do {
             let store = try PeopleStore(path: path)
-            #expect(try await store.appliedMigrations() == ["v1", "v2", "v4_memoryHooks"])
+            #expect(try await store.appliedMigrations() == ["v1", "v2", "v3_faceBox", "v4_memoryHooks"])
             try await store.upsert(person)
         }
         let reopened = try PeopleStore(path: path)
-        #expect(try await reopened.appliedMigrations() == ["v1", "v2", "v4_memoryHooks"])
+        #expect(try await reopened.appliedMigrations() == ["v1", "v2", "v3_faceBox", "v4_memoryHooks"])
         #expect(try await reopened.person(person.id) == person)
     }
 

@@ -36,6 +36,11 @@ extension PeopleStore {
             throw PeopleStoreError.hookPersonMismatch(hook: stray.id, expected: person)
         }
         try await write { db in
+            guard
+                try Bool.fetchOne(
+                    db, sql: "SELECT EXISTS (SELECT 1 FROM person WHERE id = ?)",
+                    arguments: [person.description]) == true
+            else { throw PeopleStoreError.unknownPerson(person) }
             try db.execute(
                 sql: "DELETE FROM memory_hook WHERE personId = ? AND source = ?",
                 arguments: [person.description, source.rawValue])
