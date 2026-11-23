@@ -12,7 +12,9 @@ public struct ContextCard: View {
     public var body: some View {
         let shape = RoundedRectangle(cornerRadius: 18)
         VStack(alignment: .leading, spacing: 10) {
-            FringedText(text: data.title, font: .system(size: 24, weight: .semibold, design: .rounded))
+            FringedText(
+                text: data.title, font: .system(size: 24, weight: .semibold, design: .rounded),
+                lineLimit: 2, minimumScaleFactor: 0.7)
             if let subtitle = data.subtitle {
                 Text(subtitle)
                     .font(.system(size: 14, design: .rounded))
@@ -52,30 +54,32 @@ public struct ContextCard: View {
     }
 }
 
-enum PreviewData {
-    static let label = LabelData(
-        personID: PersonID(), title: "Sample Person", subtitle: "Preview roommate",
-        chips: [
-            LabelChip(kind: .lastInteraction, text: "Texted 2d ago", priority: 3),
-            LabelChip(kind: .upcoming, text: "Birthday in 5d", priority: 2),
-            LabelChip(kind: .openLoop, text: "Owes you a reply", priority: 1),
-        ])
-}
+#if DEBUG
+    enum PreviewData {
+        static let label = LabelData(
+            personID: PersonID(), title: "Sample Person", subtitle: "Preview roommate",
+            chips: [
+                LabelChip(kind: .lastInteraction, text: "Texted 2d ago", priority: 3),
+                LabelChip(kind: .upcoming, text: "Birthday in 5d", priority: 2),
+                LabelChip(kind: .openLoop, text: "Owes you a reply", priority: 1),
+            ])
+    }
 
-#Preview("ContextCard") {
-    ContextCard(data: PreviewData.label)
-        .padding()
-        .background(.black)
-}
+    #Preview("ContextCard") {
+        ContextCard(data: PreviewData.label)
+            .padding()
+            .background(.black)
+    }
 
-#Preview("HologramLabel") {
-    GeometryReader { geo in
-        ZStack {
-            Color.black
-            HologramLabel(
-                data: PreviewData.label, faceRect: CGRect(x: 120, y: 300, width: 110, height: 140),
-                viewSize: geo.size, state: .stable)
-            UnknownFaceRing(faceRect: CGRect(x: 40, y: 500, width: 90, height: 110))
+    #Preview("HologramLabel") {
+        GeometryReader { geo in
+            ZStack {
+                Color.black
+                HologramLabel(
+                    data: PreviewData.label, faceRect: CGRect(x: 120, y: 300, width: 110, height: 140),
+                    viewSize: geo.size, state: .stable)
+                UnknownFaceRing(faceRect: CGRect(x: 40, y: 500, width: 90, height: 110))
+            }
         }
     }
-}
+#endif
