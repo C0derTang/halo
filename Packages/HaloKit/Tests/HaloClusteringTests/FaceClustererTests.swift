@@ -307,3 +307,60 @@ private func assignFixture() throws -> ([FaceEmbedding], ClusteringResult, [[Flo
     #expect(r.lowQuality == [poor.id])
     #expect(r.clusters == base.clusters)
 }
+
+@Suite struct FaceClusterInitTests {
+    private let a = UUID(uuidString: "00000000-0000-0000-0000-00000000000B")!
+    private let b = UUID(uuidString: "00000000-0000-0000-0000-00000000000A")!
+    private var centroid: [Float] { [Float](repeating: 0.1, count: 32) }
+
+    @Test func buildsAndSortsMembers() throws {
+        let c = try FaceCluster(
+            id: b, space: space, memberIDs: [a, b], representativeID: a, cohesion: 0.8,
+            centroid: centroid)
+        #expect(c.memberIDs == [b, a])
+        #expect(c.representativeID == a)
+        #expect(c.size == 2)
+        #expect(c.cohesion == 0.8)
+    }
+
+    @Test func rejectsInvalidParts() {
+        let stranger = UUID()
+        func make(
+            members: [UUID], rep: UUID, cohesion: Float = 1, centroid: [Float]
+        ) throws -> FaceCluster {
+            try FaceCluster(
+                id: b, space: space, memberIDs: members, representativeID: rep, cohesion: cohesion,
+                centroid: centroid)
+        }
+        #expect(throws: ClusteringError.invalidCluster(id: b)) {
+            try make(members: [], rep: a, centroid: centroid)
+        }
+        #expect(throws: ClusteringError.invalidCluster(id: b)) {
+            try make(members: [a], rep: stranger, centroid: centroid)
+        }
+        #expect(throws: ClusteringError.invalidCluster(id: b)) {
+            try make(members: [a, a], rep: a, centroid: centroid)
+        }
+        #expect(throws: ClusteringError.invalidCluster(id: b)) {
+            try make(members: [a], rep: a, centroid: [1, 2, 3])
+        }
+        #expect(throws: ClusteringError.invalidCluster(id: b)) {
+            try make(members: [a], rep: a, cohesion: .nan, centroid: centroid)
+        }
+        #expect(throws: ClusteringError.invalidCluster(id: b)) {
+            try make(members: [a], rep: a, centroid: [Float](repeating: .infinity, count: 32))
+        }
+    }
+
+    @Test func roundTripsAClusterer() throws {
+        var g = LCG(state: 7)
+        let center = centers(1)[0]
+        let faces = (0..<5).map { _ in sample(center, noise: 0.2, g: &g) }
+        let original = try #require(try FaceClusterer().cluster(faces).clusters.first)
+        let rebuilt = try FaceCluster(
+            id: original.id, space: original.space, memberIDs: original.memberIDs,
+            representativeID: original.representativeID, cohesion: original.cohesion,
+            centroid: original.centroid)
+        #expect(rebuilt == original)
+    }
+}

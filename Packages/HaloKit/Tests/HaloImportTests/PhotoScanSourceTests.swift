@@ -2,6 +2,7 @@ import CoreGraphics
 import Foundation
 import HaloCore
 import ImageIO
+import Synchronization
 import Testing
 
 @testable import HaloImport
@@ -111,9 +112,80 @@ private func pageAll(limit: Int) -> [PhotoAsset] {
         @Test func photoKitRequestsAreLocalOnlyBestQuality() {
             let options = PhotoKitLibrarySource.requestOptions()
             #expect(options.isNetworkAccessAllowed == false)
-            #expect(options.deliveryMode == .highQualityFormat)
+            #expect(options.deliveryMode == .opportunistic)
             #expect(options.isSynchronous == false)
             #expect(options.version == .current)
         }
     #endif
+}
+
+private func testImage() -> PhotoScanImage {
+    let context = CGContext(
+        data: nil, width: 2, height: 2, bitsPerComponent: 8, bytesPerRow: 0,
+        space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+    return PhotoScanImage(image: context.makeImage()!)
+}
+
+private final class CancelFlag: Sendable {
+    private let value = Mutex(false)
+    func set() { value.withLock { $0 = true } }
+    var isSet: Bool { value.withLock { $0 } }
+}
+
+@Suite struct PhotoScanImageRequestTests {
+    @Test func finalDeliveryAfterDegradedPreviewWins() async {
+        let image = testImage()
+        let result = await PhotoScanImageRequest.load(timeout: .seconds(5)) { deliver in
+            deliver(nil, true)
+            Task {
+                deliver(image, false)
+                deliver(nil, false)  // a stray later callback is ignored
+            }
+            return {}
+        }
+        #expect(result != nil)
+    }
+
+    @Test func degradedOnlyTimesOutAndCancels() async {
+        let flag = CancelFlag()
+        let result = await PhotoScanImageRequest.load(timeout: .milliseconds(50)) { deliver in
+            deliver(testImage(), true)
+            return { flag.set() }
+        }
+        #expect(result == nil)
+        #expect(flag.isSet)
+    }
+
+    @Test func neverCalledTimesOut() async {
+        let result = await PhotoScanImageRequest.load(timeout: .milliseconds(50)) { _ in {} }
+        #expect(result == nil)
+    }
+
+    @Test func finalNilResolvesImmediately() async {
+        let result = await PhotoScanImageRequest.load(timeout: .seconds(30)) { deliver in
+            deliver(nil, false)
+            return {}
+        }
+        #expect(result == nil)
+    }
+
+    @Test func synchronousFinalDeliveryBeforeStartReturns() async {
+        let image = testImage()
+        let result = await PhotoScanImageRequest.load(timeout: .seconds(30)) { deliver in
+            deliver(image, false)
+            return {}
+        }
+        #expect(result != nil)
+    }
+
+    @Test func taskCancellationResolvesNilAndCancels() async {
+        let flag = CancelFlag()
+        let task = Task {
+            await PhotoScanImageRequest.load(timeout: .seconds(30)) { _ in { flag.set() } }
+        }
+        try? await Task.sleep(for: .milliseconds(50))
+        task.cancel()
+        #expect(await task.value == nil)
+        #expect(flag.isSet)
+    }
 }

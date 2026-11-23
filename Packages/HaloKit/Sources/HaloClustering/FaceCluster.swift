@@ -17,6 +17,36 @@ public struct FaceCluster: Hashable, Sendable, Identifiable {
     public var centroid: [Float]
 
     public var size: Int { memberIDs.count }
+
+    /// Rebuilds a cluster from stored parts (e.g. a persisted suggestion). Throws
+    /// `ClusteringError.invalidCluster` unless there is at least one member, the representative is a
+    /// member and `centroid.count == space.dimension`. Members are sorted by `uuidString` (the
+    /// documented order) and duplicates are rejected. Values are otherwise taken as given.
+    public init(
+        id: UUID, space: EmbeddingSpace, memberIDs: [UUID], representativeID: UUID, cohesion: Float,
+        centroid: [Float]
+    ) throws {
+        guard !memberIDs.isEmpty, Set(memberIDs).count == memberIDs.count,
+            memberIDs.contains(representativeID), centroid.count == space.dimension,
+            cohesion.isFinite, centroid.allSatisfy(\.isFinite)
+        else { throw ClusteringError.invalidCluster(id: id) }
+        self.init(
+            trusted: id, space: space, memberIDs: memberIDs.sorted { $0.uuidString < $1.uuidString },
+            representativeID: representativeID, cohesion: cohesion, centroid: centroid)
+    }
+
+    /// Unvalidated; for the clusterer, which constructs these from data it just checked.
+    init(
+        trusted id: UUID, space: EmbeddingSpace, memberIDs: [UUID], representativeID: UUID,
+        cohesion: Float, centroid: [Float]
+    ) {
+        self.id = id
+        self.space = space
+        self.memberIDs = memberIDs
+        self.representativeID = representativeID
+        self.cohesion = cohesion
+        self.centroid = centroid
+    }
 }
 
 /// A suggested identity for a cluster. Never applied automatically.
