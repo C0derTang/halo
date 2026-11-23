@@ -8,16 +8,27 @@ import Synchronization
 /// Invariants enforced here:
 /// - `confirmedGallery(space:)` only returns embeddings owned by a `confirmed` person whose space
 ///   matches exactly (model ID and dimension).
-/// - `forget(_:)` removes every row that references the person, in one transaction, with
-///   `PRAGMA secure_delete = ON` so freed pages are zeroed on disk, then folds the WAL back into
-///   the main file. If a reader blocks that checkpoint, the erasure stays pending and is retried
-///   after every later write and by `flushPendingErasure()`.
-public final class PeopleStore: PeopleStoring {
+/// - Cluster records only ever hold unassigned embeddings; `confirm(cluster:as:)` is the only
+///   enrollment path that turns a clustering suggestion into a recognizable person (invariant 3).
+/// - `forget(_:)` and `eraseEverything()` remove every affected row in one transaction, with
+///   `PRAGMA secure_delete = ON` so freed pages are zeroed on disk, then fold the WAL back into the
+///   main file. If a reader blocks that checkpoint, the erasure stays pending and is retried after
+///   every later write (without waiting for readers) and by `flushPendingErasure()` (waiting).
+///
+/// Latency note: the waiting checkpoint of `forget`, `eraseEverything` and `flushPendingErasure`
+/// runs on the single writer connection, so while a reader blocks it, any ordinary write issued
+/// meanwhile queues behind it for up to `busyTimeout` (default 2 s). Ordinary writes themselves
+/// never wait for readers.
+public final class PeopleStore: PeopleStoring, EnrollmentStoring, PrivacyStoring {
     /// How long a checkpoint/write waits for other connections before giving up.
     public static let defaultBusyTimeout: TimeInterval = 2
 
     let writer: any DatabaseWriter
-    /// True while a forget's WAL truncate checkpoint has not completed yet.
+    /// The connections' configured busy timeout, restored after a no-wait checkpoint attempt.
+    let busyTimeout: TimeInterval
+    /// True while an erasure's WAL truncate checkpoint has not completed yet. Set only inside an
+    /// erasing write transaction and cleared only inside a successful checkpoint. Both run on the
+    /// serialized writer, so a checkpoint can never clear the flag for an erasure it did not cover.
     private let erasurePending = Mutex(false)
 
     /// Opens (or creates) the store at `path`. On iOS the database file and its `-wal`/`-shm`
@@ -31,7 +42,7 @@ public final class PeopleStore: PeopleStoring {
         try FileProtection.prepareDatabaseFile(at: path)
         let pool = try DatabasePool(path: path, configuration: Self.configuration(busyTimeout: busyTimeout))
         try FileProtection.protectDatabaseFiles(at: path)
-        try self.init(writer: pool)
+        try self.init(writer: pool, busyTimeout: busyTimeout)
     }
 
     /// A private in-memory store, for tests and previews.
@@ -45,8 +56,9 @@ public final class PeopleStore: PeopleStoring {
         return directory.appendingPathComponent("people.sqlite").path
     }
 
-    init(writer: any DatabaseWriter) throws {
+    init(writer: any DatabaseWriter, busyTimeout: TimeInterval = defaultBusyTimeout) throws {
         self.writer = writer
+        self.busyTimeout = busyTimeout
         try Schema.migrator.migrate(writer)
     }
 
@@ -118,22 +130,24 @@ public final class PeopleStore: PeopleStoring {
     /// Idempotent for the same owner; throws `identityConflict` if another person already owns
     /// the (kind, value) pair, so identity resolution never silently reassigns a handle.
     public func addIdentity(_ identity: Identity) async throws {
-        try await write { db in
-            if let owner = try Row.fetchOne(
-                db, sql: "SELECT personId FROM identity WHERE kind = ? AND value = ?",
-                arguments: [identity.kind.rawValue, identity.value])
-            {
-                let existing = try RowDecoding.personID(owner, "personId", table: Schema.identity)
-                guard existing == identity.personID else {
-                    throw PeopleStoreError.identityConflict(
-                        kind: identity.kind, value: identity.value, existingOwner: existing)
-                }
-                return
+        try await write { db in try Self.insertIdentity(identity, in: db) }
+    }
+
+    static func insertIdentity(_ identity: Identity, in db: Database) throws {
+        if let owner = try Row.fetchOne(
+            db, sql: "SELECT personId FROM identity WHERE kind = ? AND value = ?",
+            arguments: [identity.kind.rawValue, identity.value])
+        {
+            let existing = try RowDecoding.personID(owner, "personId", table: Schema.identity)
+            guard existing == identity.personID else {
+                throw PeopleStoreError.identityConflict(
+                    kind: identity.kind, value: identity.value, existingOwner: existing)
             }
-            try db.execute(
-                sql: "INSERT INTO identity (personId, kind, value) VALUES (?, ?, ?)",
-                arguments: [identity.personID.description, identity.kind.rawValue, identity.value])
+            return
         }
+        try db.execute(
+            sql: "INSERT INTO identity (personId, kind, value) VALUES (?, ?, ?)",
+            arguments: [identity.personID.description, identity.kind.rawValue, identity.value])
     }
 
     public func person(matching kind: Identity.Kind, value: String) async throws -> Person? {
@@ -200,52 +214,121 @@ public final class PeopleStore: PeopleStoring {
                         embedding.createdAt.storedValue,
                     ])
             }
+            // An embedding that now belongs to someone can no longer sit in a suggestion cluster.
+            let assigned = embeddings.filter { $0.personID != nil }.map(\.id)
+            if !assigned.isEmpty {
+                try Self.detachFromClusters(assigned, in: db)
+            }
         }
     }
 
-    // MARK: - Forget
+    // MARK: - Forget / erase
 
+    /// Irreversibly deletes the person, every row that references them, and every suggestion
+    /// cluster that pointed at them together with that cluster's member embeddings.
     public func forget(_ id: PersonID) async throws {
         let key = id.description
         try await writer.write { db in
             try Self.scrubDigest(db, forgetting: key)
+            // Clusters suggesting this person hold (unassigned) faces that most likely ARE this
+            // person: delete those embeddings, then the clusters themselves.
+            try db.execute(
+                sql: """
+                    DELETE FROM embedding WHERE personId IS NULL AND id IN (
+                        SELECT cluster_member.embeddingId FROM cluster_member
+                        JOIN cluster ON cluster.id = cluster_member.clusterId
+                        WHERE cluster.suggestedPersonId = ?)
+                    """,
+                arguments: [key])
+            try db.execute(sql: "DELETE FROM cluster WHERE suggestedPersonId = ?", arguments: [key])
             for table in Schema.personScopedTables {
                 try db.execute(sql: "DELETE FROM \(table) WHERE personId = ?", arguments: [key])
             }
             try db.execute(sql: "DELETE FROM person WHERE id = ?", arguments: [key])
+            self.markErasurePending()
         }
-        erasurePending.withLock { $0 = true }
-        await flushPendingErasure()
+        await checkpointPendingErasure(waitForReaders: true)
     }
 
-    /// Whether a forget's on-disk erasure (WAL checkpoint) is still waiting on a reader.
+    /// Kill switch: deletes every row of every table (people, identities, embeddings, clusters,
+    /// scan cursor, digest, recognition log) in one transaction, then erases the WAL like `forget`.
+    public func eraseEverything() async throws {
+        try await writer.write { db in
+            for table in try Self.dataTables(db) {
+                try db.execute(sql: "DELETE FROM \(table.quotedDatabaseIdentifier)")
+            }
+            self.markErasurePending()
+        }
+        await checkpointPendingErasure(waitForReaders: true)
+    }
+
+    /// Every table holding app data: all user tables except SQLite's and GRDB's own bookkeeping.
+    static func dataTables(_ db: Database) throws -> [String] {
+        try String.fetchAll(
+            db,
+            sql: """
+                SELECT name FROM sqlite_master
+                WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'grdb_%'
+                ORDER BY name
+                """)
+    }
+
+    /// Whether an erasure's on-disk completion (WAL checkpoint) is still waiting on a reader.
     public var hasPendingErasure: Bool { erasurePending.withLock { $0 } }
 
-    /// Completes a pending forget erasure: folds the WAL (whose frames hold the zeroed pages)
-    /// back into the main file, overwriting the pre-delete pages, and truncates the WAL to zero.
-    /// The app calls this when it moves to the background. Returns true when nothing is pending.
+    /// Completes a pending erasure: folds the WAL (whose frames hold the zeroed pages) back into the
+    /// main file, overwriting the pre-delete pages, and truncates the WAL to zero. Waits up to the
+    /// busy timeout for readers. The app calls this when it moves to the background. Returns true
+    /// when nothing is pending.
     @discardableResult
     public func flushPendingErasure() async -> Bool {
+        await checkpointPendingErasure(waitForReaders: true)
+    }
+
+    /// Call only from inside a write transaction that deleted data needing on-disk erasure.
+    func markErasurePending() {
+        erasurePending.withLock { $0 = true }
+    }
+
+    /// Truncate-checkpoints the WAL if an erasure is pending. Without `waitForReaders` the
+    /// connection's busy timeout is dropped to zero for the attempt, so an ordinary write never
+    /// stalls behind a long-lived reader; it is restored afterwards.
+    @discardableResult
+    private func checkpointPendingErasure(waitForReaders: Bool) async -> Bool {
         guard hasPendingErasure else { return true }
+        let restoreMilliseconds = Int((busyTimeout * 1000).rounded())
         do {
-            try await writer.writeWithoutTransaction { db in
-                _ = try db.checkpoint(.truncate)
+            return try await writer.writeWithoutTransaction { db in
+                // Re-check on the writer: another checkpoint may have completed meanwhile.
+                guard self.hasPendingErasure else { return true }
+                if !waitForReaders {
+                    try db.execute(sql: "PRAGMA busy_timeout = 0")
+                }
+                defer {
+                    if !waitForReaders {
+                        try? db.execute(sql: "PRAGMA busy_timeout = \(restoreMilliseconds)")
+                    }
+                }
+                try db.checkpoint(.truncate)
+                // Still on the writer: no erasing write can have committed since the checkpoint.
+                self.erasurePending.withLock { $0 = false }
+                return true
             }
-            erasurePending.withLock { $0 = false }
-            return true
         } catch {
-            // SQLITE_BUSY after the busy timeout: a reader still holds an older snapshot. Stay
-            // pending; the next write or flush retries.
+            // SQLITE_BUSY: a reader still holds an older snapshot. Stay pending; the next write or
+            // flush retries.
             return false
         }
     }
 
-    /// Runs a write transaction, then retries any pending forget erasure.
-    private func write<T: Sendable>(
+    /// Runs a write transaction, then retries any pending erasure without waiting for readers.
+    /// It can still queue for up to `busyTimeout` behind a concurrent forget/erase/flush checkpoint
+    /// that is waiting on a reader (they share the one writer connection).
+    func write<T: Sendable>(
         _ updates: @escaping @Sendable (Database) throws -> T
     ) async throws -> T {
         let result = try await writer.write(updates)
-        await flushPendingErasure()
+        await checkpointPendingErasure(waitForReaders: false)
         return result
     }
 

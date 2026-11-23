@@ -9,6 +9,27 @@ public enum PeopleStoreError: Error, Equatable, Sendable {
     case identityConflict(kind: Identity.Kind, value: String, existingOwner: PersonID)
     /// A stored row could not be decoded.
     case corruptRow(table: String, column: String)
+    /// No person with this ID exists.
+    case unknownPerson(PersonID)
+    /// No stored cluster record with this ID exists.
+    case unknownCluster(id: String)
+    /// None of the cluster's member embeddings exist any more (all deleted during triage). The
+    /// stale record was deleted and the person was NOT confirmed.
+    case emptyCluster(id: String)
+    /// A cluster passed to `replaceClusters` is malformed (a caller bug); nothing was stored.
+    /// Stale state (deleted/assigned members, a forgotten suggested person) is pruned, not thrown.
+    case invalidCluster(id: String, reason: ClusterProblem)
+
+    public enum ClusterProblem: Equatable, Sendable {
+        /// Two clusters share this ID.
+        case duplicateID
+        /// The cluster was passed with no members.
+        case empty
+        /// `representativeID` is not one of `memberIDs`.
+        case representativeNotMember
+        /// The embedding is listed twice (in this cluster or in another one).
+        case duplicateMember(UUID)
+    }
 }
 
 /// Embedding vectors are stored as a packed little-endian IEEE-754 Float32 BLOB.
@@ -51,6 +72,13 @@ enum RowDecoding {
             throw PeopleStoreError.corruptRow(table: table, column: column)
         }
         return PersonID(uuid)
+    }
+
+    static func uuid(_ row: Row, _ column: String, table: String) throws -> UUID {
+        guard let string: String = row[column], let uuid = UUID(uuidString: string) else {
+            throw PeopleStoreError.corruptRow(table: table, column: column)
+        }
+        return uuid
     }
 
     static func person(_ row: Row) throws -> Person {
