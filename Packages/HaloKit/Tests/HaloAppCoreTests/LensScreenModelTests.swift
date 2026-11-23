@@ -3,6 +3,7 @@ import Foundation
 import HaloCore
 import HaloLens
 import HaloUI
+import Observation
 import Testing
 
 @testable import HaloAppCore
@@ -199,6 +200,84 @@ struct LensScreenModelTests {
         model.apply([lensTrack(1, lensKnown(1))])
         await model.settle()
         #expect(model.items.first?.label?.subtitle == "digest:4 ids:0")
+    }
+
+    // MARK: Forget
+
+    @Test func forgetLabelRemovesTheNameSynchronously() async {
+        let model = makeModel()
+        await model.start()
+        model.apply([lensTrack(1, lensKnown(1)), lensTrack(2, lensKnown(2), x: 0.6)])
+        await model.settle()
+        #expect(model.items.allSatisfy { $0.label != nil })
+        let lookupsBefore = store.personLookups.count
+
+        model.forgetLabel(lensPersonID(1))
+        // No await: gone immediately, without a store round-trip. Others keep their label.
+        #expect(model.items[0].label == nil)
+        #expect(model.items[1].label?.personID == lensPersonID(2))
+        #expect(store.personLookups.count == lookupsBefore)
+
+        // The pipeline may still report them until setMatcher lands: never relabeled or re-looked
+        // up, also not after a refresh or a new session, and never logged again.
+        model.apply([lensTrack(1, lensKnown(1)), lensTrack(2, lensKnown(2), x: 0.6)])
+        model.refreshLabels()
+        await model.settle()
+        model.stop()
+        await model.start()
+        model.apply([lensTrack(1, lensKnown(1))])
+        await model.settle()
+        #expect(model.items.first?.label == nil)
+        #expect(!store.personLookups.dropFirst(lookupsBefore).contains(lensPersonID(1)))
+        #expect(store.logged.filter { $0 == lensPersonID(1) }.count == 1)
+    }
+
+    @Test func forgetLabelDiscardsAnInFlightLoad() async {
+        let model = makeModel()
+        await model.start()
+        model.apply([lensTrack(1, lensKnown(1))])  // load in flight
+        model.forgetLabel(lensPersonID(1))
+        await model.settle()
+        #expect(model.items.first?.label == nil)
+    }
+
+    // MARK: Publishing
+
+    @Test func unchangedFramesDoNotRepublishItems() async {
+        let model = makeModel()
+        await model.start()
+        let frame = [lensTrack(1, .unknown), lensTrack(2, .ambiguous, x: 0.6)]
+        model.apply(frame)
+        let changes = LensCounter()
+        withObservationTracking {
+            _ = model.items
+        } onChange: {
+            changes.increment()
+        }
+        model.apply(frame)
+        model.apply(frame)
+        #expect(changes.value == 0)
+        model.apply([lensTrack(1, .unknown, x: 0.31)])
+        #expect(changes.value == 1)
+    }
+
+    // MARK: Subscription ownership
+
+    @Test func subscriptionSurvivesStopAndIsCancelledOnDeinit() async {
+        var model: LensScreenModel? = makeModel()
+        await model?.start()
+        model?.stop()
+        await model?.start()
+        #expect(model?.isSubscribed == true)
+        #expect(!source.terminated)
+        source.continuation.yield([lensTrack(1, .unknown)])
+        for _ in 0..<200 where model?.items.isEmpty == true { await Task.yield() }
+        #expect(model?.items.count == 1)
+
+        model?.stop()
+        model = nil
+        for _ in 0..<200 where !source.terminated { await Task.yield() }
+        #expect(source.terminated)
     }
 
     // MARK: Session, camera and frames

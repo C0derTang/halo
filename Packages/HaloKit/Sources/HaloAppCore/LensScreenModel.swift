@@ -18,6 +18,13 @@ import Synchronization
 /// - Frame budget (invariant 7): frames go from the camera's capture queue straight to
 ///   `LensTrackSource.submit`; the main actor only maps the (small) per-frame track list.
 /// - `logRecognition` runs once per person per lens session (`start()` ... `stop()`).
+/// - `forgetLabel(_:)` removes a forgotten person's name synchronously; that person is never
+///   looked up, labeled or logged again by this model.
+///
+/// Ownership: one model per `LensPipeline`, owned for the app's lifetime (the composition root).
+/// The pipeline's `tracks` stream is single-consumer and cancelling its iteration finishes it, so
+/// the subscription is created on the first `start()`, kept across `stop()` / `start()` (output is
+/// ignored while stopped), and cancelled only when the model is deallocated.
 @MainActor @Observable
 public final class LensScreenModel {
     /// What the overlay draws, one per live track, sorted by track ID.
@@ -44,7 +51,8 @@ public final class LensScreenModel {
     private let now: @Sendable () -> Date
     private let frameBox = LensFrameRecorder()
 
-    @ObservationIgnored private var subscription: Task<Void, Never>?
+    /// Pipeline subscription. Held in a Sendable box so the nonisolated `deinit` can cancel it.
+    private let subscription = LensSubscription()
     @ObservationIgnored private var latestTracks: [LensTrack] = []
     /// Label cache, per person. Survives track loss; cleared on `start()` and `refreshLabels()`.
     @ObservationIgnored private var labels: [PersonID: LabelData] = [:]
@@ -55,6 +63,8 @@ public final class LensScreenModel {
     @ObservationIgnored private var unlabeled: Set<PersonID> = []
     @ObservationIgnored private var labelGeneration = 0
     @ObservationIgnored private var loggedThisSession: Set<PersonID> = []
+    /// Forgotten people (irreversible; IDs are never reused). Never looked up, labeled or logged.
+    @ObservationIgnored private var forgotten: Set<PersonID> = []
     @ObservationIgnored private var pending: [Int: Task<Void, Never>] = [:]
     @ObservationIgnored private var nextPendingID = 0
 
@@ -79,6 +89,10 @@ public final class LensScreenModel {
         self.ranker = ranker
         self.recognitionAvailable = recognitionAvailable
         self.now = now
+    }
+
+    deinit {
+        subscription.cancel()
     }
 
     // MARK: - Session
@@ -126,13 +140,24 @@ public final class LensScreenModel {
     /// people on screen. Their current labels stay up until the new ones are ready.
     public func refreshLabels() {
         labelGeneration += 1
-        let visible = Set(latestTracks.compactMap(\.personID))
+        let visible = Set(latestTracks.compactMap(\.personID)).subtracting(forgotten)
         labels = labels.filter { visible.contains($0.key) }
         loading = []
         unlabeled = []
         for person in visible.sorted(by: { $0.rawValue.uuidString < $1.rawValue.uuidString }) {
             loadLabel(for: person)
         }
+        rebuildItems()
+    }
+
+    /// "Forget this person" just happened: drop their label NOW, without a store round-trip, so
+    /// the name disappears from the lens immediately (invariant 3). In-flight loads for them are
+    /// discarded, and they are never looked up, labeled or logged again by this model.
+    public func forgetLabel(_ person: PersonID) {
+        forgotten.insert(person)
+        labels[person] = nil
+        loading.remove(person)
+        unlabeled.remove(person)
         rebuildItems()
     }
 
@@ -145,12 +170,13 @@ public final class LensScreenModel {
     private func subscribeIfNeeded() {
         // Subscribe once for the model's lifetime: cancelling an AsyncStream iteration finishes
         // the stream, so the subscription must not be torn down on stop().
-        guard subscription == nil else { return }
         let stream = source.tracks
-        subscription = Task { [weak self] in
-            for await tracks in stream {
-                guard let self else { return }
-                self.apply(tracks)
+        subscription.startIfNeeded {
+            Task { [weak self] in
+                for await tracks in stream {
+                    guard let self else { return }
+                    self.apply(tracks)
+                }
             }
         }
     }
@@ -160,7 +186,7 @@ public final class LensScreenModel {
         guard isRunning else { return }
         latestTracks = tracks
         for track in tracks {
-            guard let person = Self.knownPerson(track) else { continue }
+            guard let person = Self.knownPerson(track), !forgotten.contains(person) else { continue }
             logOnce(person)
             if labels[person] == nil, !loading.contains(person), !unlabeled.contains(person) {
                 loadLabel(for: person)
@@ -169,12 +195,14 @@ public final class LensScreenModel {
         rebuildItems()
     }
 
+    /// Publishes only on change, so an unchanged frame doesn't invalidate the overlay.
     private func rebuildItems() {
-        items = latestTracks.map { track in
+        let next = latestTracks.map { track in
             LensOverlayItem(
                 trackID: track.trackID, rect: track.smoothedBox, state: Self.hologramState(track.state),
                 label: Self.knownPerson(track).flatMap { labels[$0] })
         }
+        if next != items { items = next }
     }
 
     /// The person a track is recognized as, only when its stable identity is `.known`.
@@ -225,7 +253,8 @@ public final class LensScreenModel {
     }
 
     private func finishLoad(_ person: PersonID, label: LabelData?, generation: Int) {
-        guard generation == labelGeneration else { return }  // superseded by a refresh
+        // Superseded by a refresh, or forgotten while loading.
+        guard generation == labelGeneration, !forgotten.contains(person) else { return }
         loading.remove(person)
         if let label {
             labels[person] = label
@@ -280,6 +309,9 @@ public final class LensScreenModel {
         }
     }
 
+    /// Whether the pipeline subscription is live (tests).
+    var isSubscribed: Bool { subscription.isActive }
+
     /// Waits for in-flight label loads and log writes (tests).
     func settle() async {
         while let (_, task) = pending.first {
@@ -319,4 +351,26 @@ final class LensFrameRecorder: Sendable {
             return geometry
         }
     }
+}
+
+/// Owns the pipeline subscription task. Sendable so the model's nonisolated `deinit` can cancel it.
+final class LensSubscription: Sendable {
+    private let task = Mutex<Task<Void, Never>?>(nil)
+
+    /// Starts the subscription unless one exists. `make` runs at most once.
+    func startIfNeeded(_ make: () -> Task<Void, Never>) {
+        task.withLock { current in
+            if current == nil { current = make() }
+        }
+    }
+
+    func cancel() {
+        let current = task.withLock { current -> Task<Void, Never>? in
+            defer { current = nil }
+            return current
+        }
+        current?.cancel()
+    }
+
+    var isActive: Bool { task.withLock { $0 != nil } }
 }

@@ -32,12 +32,16 @@ final class LensFakeTrackSource: LensTrackSource {
     let tracks: AsyncStream<[LensTrack]>
     let continuation: AsyncStream<[LensTrack]>.Continuation
     private let submitted = Mutex(0)
+    private let terminatedFlag = Mutex(false)
 
     init() {
         (tracks, continuation) = AsyncStream.makeStream(of: [LensTrack].self)
+        continuation.onTermination = { [weak self] _ in self?.terminatedFlag.withLock { $0 = true } }
     }
 
     var submittedCount: Int { submitted.withLock { $0 } }
+    /// The consumer stopped iterating (its task was cancelled).
+    var terminated: Bool { terminatedFlag.withLock { $0 } }
 
     func submit(_ frame: VideoFrame) -> Bool {
         submitted.withLock { $0 += 1 }
@@ -86,6 +90,12 @@ final class LensFakeCamera: CameraControlling {
 }
 
 struct LensFakeError: Error {}
+
+final class LensCounter: Sendable {
+    private let count = Mutex(0)
+    var value: Int { count.withLock { $0 } }
+    func increment() { count.withLock { $0 += 1 } }
+}
 
 /// In-memory store recording every lookup, so tests can assert who was (not) looked up.
 final class LensFakeStore: PeopleStoring, PrivacyStoring {
