@@ -20,6 +20,7 @@ let package = Package(
         .library(name: "HaloMemory", targets: ["HaloMemory"]),
         .library(name: "HaloBridgeKit", targets: ["HaloBridgeKit"]),
         .executable(name: "halo-bridge", targets: ["halo-bridge"]),
+        .executable(name: "halo-calibrate", targets: ["halo-calibrate"]),
     ],
     dependencies: [
         .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.0.0")
@@ -59,6 +60,8 @@ let package = Package(
         .target(
             name: "HaloBridgeKit", dependencies: ["HaloCore", .product(name: "GRDB", package: "GRDB.swift")]),
         .executableTarget(name: "halo-bridge", dependencies: ["HaloBridgeKit"]),
+        // macOS-only threshold calibration on public face-verification pairs (never personal photos).
+        .executableTarget(name: "halo-calibrate", dependencies: ["HaloCore", "HaloVision", "HaloMatching"]),
 
         .testTarget(name: "HaloCoreTests", dependencies: ["HaloCore"]),
         .testTarget(name: "HaloStoreTests", dependencies: ["HaloStore", "HaloCore"]),

@@ -77,15 +77,29 @@ halo-bridge (macOS CLI, HaloBridgeKit) ──encrypted digest──► app
 | Contacts import hardening: identityConflict, cross-kind ambiguity, shared normalizer | HaloImport/Contacts | sonnet |
 | Algorithm follow-ups (matching, tracking, clustering) | HaloMatching/Tracking/Clustering | sonnet |
 
-**Wave 3 — integration**
-| Issue | Where | Tier |
-|-------|-------|------|
-| Live Lens screen: pipeline + ranker + hologram overlay + tap-to-card | App/Halo/Lens | opus |
-| App composition root: real implementations wired into seams, RootView | App/Halo | opus |
-| Onboarding + permissions + consent | App/Halo/Onboarding | sonnet |
-| People list + person detail | App/Halo/People | sonnet |
+**Wave 2: DONE.** #29–#38 merged.
 
-**Wave 4 — next features** (items 7–10 above) + perf pass + TestFlight.
+**Wave 3 (integration): DONE.** #46 onboarding, #47 People, #48 PhotoScan hardening, #49 pairing + digest
+import, #50 follow-ups, #52 Lens screen, #53 CI toolchain compat, #54 composition root.
+
+**Wave 4: DONE.**
+- #68 final app hookup (all tabs real, one camera, kill switch stops every writer)
+- #62 face boxes
+- #67 bridge v2 (opt-in message excerpts, clean-room typedstream decoder)
+- #65 memory-hook store
+- #66 on-device Foundation Models hooks
+- #64 hook chips
+- #63 Whisper mode (headphone/confirmed-device only)
+
+**Wave 5 (in progress)**
+| Issue | Tier |
+|-------|------|
+| Wire memory hooks + Whisper into the app; #68 follow-ups | opus |
+| Moments: quick note on people in view → memory hook | sonnet |
+| Library follow-ups from #17 (memory filter, whisper retry cap, misc) | sonnet |
+| `halo-calibrate`: MatchPolicy calibration on public verification pairs | opus |
+
+**Later (needs a decision):** ARKit 3D anchoring; TestFlight distribution; Android.
 
 ## Known constraints (verified 2026-11)
 - No Xcode on the dev machine yet → local checks build only; CI (macos-26) runs tests + iOS build.
