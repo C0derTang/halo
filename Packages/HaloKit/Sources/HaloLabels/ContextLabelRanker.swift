@@ -1,4 +1,5 @@
 import Foundation
+import HaloBridgeKit
 import HaloCore
 
 /// Turns a person + identities + iMessage digest into the `LabelData` the hologram renders.
@@ -14,11 +15,19 @@ public struct ContextLabelRanker: LabelRanking {
 
     private let calendar: Calendar
     private let locale: Locale
+    private let normalizer: HandleNormalizer
 
+    /// - Parameters:
+    ///   - calendar: callers inject the Calendar (including its time zone) for deterministic output.
+    ///   - normalizer: MUST be the same normalizer (same region) the importer used to store
+    ///     identities, otherwise local-format numbers will not match across sides.
     public init(
         calendar: Calendar = Calendar(identifier: .gregorian),
-        locale: Locale = Locale(identifier: "en_US_POSIX")
+        locale: Locale = Locale(identifier: "en_US_POSIX"),
+        normalizer: HandleNormalizer = HandleNormalizer(
+            region: Locale.current.region?.identifier ?? "US")
     ) {
+        self.normalizer = normalizer
         var cal = calendar
         cal.locale = locale
         self.calendar = cal
@@ -46,6 +55,8 @@ public struct ContextLabelRanker: LabelRanking {
 
     // MARK: Attribution
 
+    /// `identities` must include other people's identities too (e.g. the store-wide set) for the
+    /// ambiguity guard to work; identities of other people are used only to drop shared handles.
     func matchingEntries(person: Person, identities: [Identity], digest: InteractionDigest)
         -> [InteractionDigest.Entry]
     {
@@ -53,13 +64,14 @@ public struct ContextLabelRanker: LabelRanking {
         var mine: Set<String> = []
         var others: Set<String> = []
         for identity in identities where handleKinds.contains(identity.kind) {
-            guard let key = LabelHandleNormalizer.key(identity.value) else { continue }
+            let key = normalizer.normalize(identity.value)
+            guard !key.isEmpty else { continue }
             if identity.personID == person.id { mine.insert(key) } else { others.insert(key) }
         }
         let owned = mine.subtracting(others)  // ambiguous handles contribute nothing
         return digest.entries.filter { entry in
-            guard let key = LabelHandleNormalizer.key(entry.handle) else { return false }
-            return owned.contains(key)
+            let key = normalizer.normalize(entry.handle)
+            return !key.isEmpty && owned.contains(key)
         }
     }
 
@@ -116,9 +128,9 @@ public struct ContextLabelRanker: LabelRanking {
         if days < 30 {
             return LabelChip(kind: .lastInteraction, text: "Texted \(num(days))d ago", priority: 0.5)
         }
-        let stale = days > Self.staleAfterDays
+        let stale = days >= Self.staleAfterDays
         let text: String
-        if days < Self.staleAfterDays {
+        if !stale {
             text = "Last texted \(num(max(1, days / 30))) mo ago"
         } else {
             text = "Last texted \(num(max(1, days / 365))) y ago"

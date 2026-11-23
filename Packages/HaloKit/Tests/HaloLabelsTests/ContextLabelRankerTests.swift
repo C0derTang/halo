@@ -1,4 +1,5 @@
 import Foundation
+import HaloBridgeKit
 import HaloCore
 import Testing
 
@@ -186,14 +187,51 @@ private func phone(_ p: Person, _ v: String = "+15551234567") -> Identity {
     #expect(rank(p) == rank(p))
 }
 
-@Test func normalizerSharedExpectations() {
-    // Must match HaloImport.HandleNormalization / HaloBridgeKit.HandleNormalizer.
-    #expect(LabelHandleNormalizer.e164("(555) 123-4567") == "+15551234567")
-    #expect(LabelHandleNormalizer.e164("+44 20 7946 0958") == "+442079460958")
-    #expect(LabelHandleNormalizer.e164("0044 20 7946 0958") == "+442079460958")
-    #expect(LabelHandleNormalizer.e164("12345") == nil)
-    #expect(LabelHandleNormalizer.email(" Foo@Bar.COM ") == "foo@bar.com")
-    #expect(LabelHandleNormalizer.email("@bar.com") == nil)
-    #expect(LabelHandleNormalizer.key("x@y.z") == "x@y.z")
-    #expect(LabelHandleNormalizer.key("junk") == nil)
+@Test func regionalNumbersAttributeWithMatchingRegion() {
+    let gb = ContextLabelRanker(
+        calendar: cal, locale: Locale(identifier: "en_US_POSIX"),
+        normalizer: HandleNormalizer(region: "GB"))
+    let fr = ContextLabelRanker(
+        calendar: cal, locale: Locale(identifier: "en_US_POSIX"),
+        normalizer: HandleNormalizer(region: "FR"))
+    let p = Person(displayName: "A")
+    let g = gb.label(
+        for: p, identities: [phone(p, "+442079460958")],
+        digest: digest([entry("020 7946 0958", last: date(2026, 6, 14))]), now: now)
+    #expect(g.chips.contains { $0.kind == .lastInteraction })
+    let f = fr.label(
+        for: p, identities: [phone(p, "+33612345678")],
+        digest: digest([entry("0612345678", last: date(2026, 6, 14))]), now: now)
+    #expect(f.chips.contains { $0.kind == .lastInteraction })
+    #expect(!HandleNormalizer(region: "GB").normalize("020 7946 0958").hasPrefix("+1"))
+    #expect(!HandleNormalizer(region: "FR").normalize("0612345678").hasPrefix("+1"))
+}
+
+@Test func localNumberNeverCollidesWithUSNumber() {
+    let gb = ContextLabelRanker(
+        calendar: cal, locale: Locale(identifier: "en_US_POSIX"),
+        normalizer: HandleNormalizer(region: "GB"))
+    let p = Person(displayName: "A")
+    // US identity must not match a GB-local number that shares digits.
+    let l = gb.label(
+        for: p, identities: [phone(p, "+12079460958")],
+        digest: digest([entry("2079460958", last: now)]), now: now)
+    #expect(l.chips.isEmpty)
+}
+
+@Test func handleNormalizingOnOneSideOnlyGivesNoChip() {
+    let p = Person(displayName: "A")
+    let l = rank(p, ids: [phone(p, "+15551234567")], digest([entry("12345", last: now)]))
+    #expect(l.chips.isEmpty)
+    let m = rank(p, ids: [phone(p, "12345")], digest([entry("+15551234567", last: now)]))
+    #expect(m.chips.isEmpty)
+}
+
+@Test func staleCutoffAtExactly365Days() {
+    let p = Person(displayName: "A")
+    func prio(_ last: Date) -> Double {
+        rank(p, ids: [phone(p)], digest([entry("+15551234567", last: last)])).chips[0].priority
+    }
+    #expect(prio(date(2025, 6, 15)) == 0.2)  // exactly 365 days
+    #expect(prio(date(2025, 6, 16)) == 0.45)  // 364 days
 }
