@@ -1,19 +1,28 @@
 import CoreGraphics
+import CoreImage
 import CoreML
 import CoreVideo
 import Foundation
 import HaloCore
+import ImageIO
 
-/// `FaceEmbedder` backed by a compiled CoreML face-recognition model (see `docs/MODELS.md` and
-/// `scripts/fetch-models.sh`).
+/// `FaceEmbedder` / `FrameFaceEmbedding` backed by a compiled CoreML face-recognition model (see
+/// `docs/MODELS.md` and `scripts/fetch-models.sh`).
+///
+/// **App entry point:** `try await CoreMLFaceEmbedder.load(directory: Bundle.main.resourceURL!)`.
+/// `load` runs the slow, blocking CoreML model load on the concurrent executor, so app startup
+/// never loads the model on the main actor. The synchronous initializers remain for tests and for
+/// callers that are already off the main actor.
 ///
 /// Pipeline per face: `FaceAligner` 112x112 crop -> model input -> raw vector -> L2 normalization.
+/// Live frames are aligned straight from the camera pixel buffer honouring `VideoFrame.orientation`
+/// (Core Image renders only the 112x112 crop; no full-frame `CGImage` copy).
 /// Accepts models whose input is either a 112x112 image or a float32 `[1, 3, 112, 112]` /
 /// `[3, 112, 112]` tensor (normalized per `Preprocessing`), and whose output is a float vector.
 ///
 /// An actor: predictions are serialized off the main actor, and the non-Sendable `MLModel` never
 /// escapes it. Nothing here touches the network or logs pixels/vectors (invariant 2).
-public actor CoreMLFaceEmbedder: FaceEmbedder {
+public actor CoreMLFaceEmbedder: FaceEmbedder, FrameFaceEmbedding {
     /// File name `fetch-models.sh` produces and the app bundles.
     public static let defaultModelName = "HaloFaceEmbedder"
     /// `EmbeddingSpace.modelID` for the default weights. Change whenever the weights change.
@@ -91,14 +100,64 @@ public actor CoreMLFaceEmbedder: FaceEmbedder {
             modelID: modelID, computeUnits: computeUnits)
     }
 
+    /// Loads `<directory>/HaloFaceEmbedder.mlmodelc` off the main actor. The app's entry point.
+    ///
+    /// - Throws: the same typed `HaloVisionError`s as `init(compiledModelAt:)`.
+    @concurrent
+    public static func load(
+        directory: URL, modelID: String = CoreMLFaceEmbedder.defaultModelID,
+        computeUnits: MLComputeUnits = .all
+    ) async throws -> CoreMLFaceEmbedder {
+        try await offMainActor {
+            try CoreMLFaceEmbedder(directory: directory, modelID: modelID, computeUnits: computeUnits)
+        }
+    }
+
+    /// Loads a compiled (`.mlmodelc`) model off the main actor.
+    ///
+    /// - Throws: the same typed `HaloVisionError`s as `init(compiledModelAt:)`.
+    @concurrent
+    public static func load(
+        compiledModelAt url: URL, modelID: String = CoreMLFaceEmbedder.defaultModelID,
+        preprocessing: Preprocessing = .arcFace, aligner: FaceAligner = FaceAligner(),
+        computeUnits: MLComputeUnits = .all
+    ) async throws -> CoreMLFaceEmbedder {
+        try await offMainActor {
+            try CoreMLFaceEmbedder(
+                compiledModelAt: url, modelID: modelID, preprocessing: preprocessing, aligner: aligner,
+                computeUnits: computeUnits)
+        }
+    }
+
+    /// Runs `body` on the concurrent executor, whatever actor the caller is on.
+    @concurrent
+    static func offMainActor<T: Sendable>(_ body: @Sendable () throws -> T) async throws -> T {
+        try body()
+    }
+
     public func embed(face: FaceObservation, in image: CGImage) async throws -> [Float] {
-        try embedSynchronously(face: face, in: image)
+        try embedSynchronously(try aligner.alignedFace(face, in: image))
+    }
+
+    /// Embeds a face from a stored image whose display orientation is `orientation` (e.g. a PhotoKit
+    /// asset's EXIF orientation). `face` is in the upright image, as `VisionFaceDetector` returns it.
+    public func embed(face: FaceObservation, in image: CGImage, orientation: CGImagePropertyOrientation)
+        async throws -> [Float]
+    {
+        let source = CIImage(cgImage: image)
+        return try embedSynchronously(try aligner.alignedFace(face, in: source, orientation: orientation))
+    }
+
+    /// Embeds a face from a live camera frame. `face` is in the frame's upright space.
+    public func embed(face: FaceObservation, in frame: VideoFrame) async throws -> [Float] {
+        let source = CIImage(cvPixelBuffer: frame.pixelBuffer)
+        return try embedSynchronously(
+            try aligner.alignedFace(face, in: source, orientation: frame.orientation))
     }
 
     /// Synchronous body so CoreML's blocking `prediction(from:)` runs on this actor's executor
     /// (never the main actor) and the non-Sendable model never crosses an isolation boundary.
-    private func embedSynchronously(face: FaceObservation, in image: CGImage) throws -> [Float] {
-        let crop = try aligner.alignedFace(face, in: image)
+    private func embedSynchronously(_ crop: AlignedFace) throws -> [Float] {
         let value: MLFeatureValue
         switch inputKind {
         case .image:

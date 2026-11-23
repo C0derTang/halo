@@ -31,6 +31,78 @@ public enum VisionGeometry {
         CGPoint(x: normalized.x * size.width, y: normalized.y * size.height)
     }
 
+    // MARK: - Pose angles
+
+    /// Module roll convention: radians in `(-π, π]`, measured in the UPRIGHT image with a top-left
+    /// origin, **positive = clockwise as displayed**. It is the angle of the eye line from the
+    /// image-left eye to the image-right eye (`FivePointLandmarks` order), so an upright face is 0,
+    /// a face tilted so its image-right eye sits lower is positive, an upside-down face is π.
+    ///
+    /// Computed in pixels (not normalized units) so non-square images are not distorted. Returns
+    /// nil unless `landmarks` holds the five alignment points and the eyes are distinct.
+    public static func roll(fromLandmarks landmarks: [CGPoint], imageSize: CGSize) -> Double? {
+        guard landmarks.count == FivePointLandmarks.count else { return nil }
+        let dx = Double((landmarks[1].x - landmarks[0].x) * imageSize.width)
+        let dy = Double((landmarks[1].y - landmarks[0].y) * imageSize.height)
+        guard dx * dx + dy * dy > 0, dx.isFinite, dy.isFinite else { return nil }
+        return normalizedAngle(atan2(dy, dx))
+    }
+
+    /// Converts Vision's roll to the module convention. Vision documents its roll as radians,
+    /// positive = counterclockwise (`VNFaceObservation.roll`), so the clockwise-positive value is
+    /// its negation.
+    public static func topLeftRoll(fromVisionRoll radians: Double) -> Double {
+        normalizedAngle(-radians)
+    }
+
+    /// Wraps an angle into `(-π, π]`.
+    static func normalizedAngle(_ radians: Double) -> Double {
+        guard radians.isFinite else { return radians }
+        var a = radians.truncatingRemainder(dividingBy: 2 * .pi)
+        if a <= -.pi { a += 2 * .pi }
+        if a > .pi { a -= 2 * .pi }
+        return a
+    }
+
+    // MARK: - Observation matching
+
+    /// One-to-one assignment of follow-up observations (`candidates`) to detected faces.
+    ///
+    /// Same `id` (Vision preserves the UUID across chained requests) wins first. Remaining pairs
+    /// with IoU ≥ `minIoU` are then assigned greedily from the highest IoU down, so each candidate
+    /// is used by at most one face: two overlapping faces can never share one landmarks result.
+    ///
+    /// - Returns: for each face, the index of its candidate, or nil.
+    static func matchOneToOne(
+        faces: [(id: UUID, box: CGRect)], candidates: [(id: UUID, box: CGRect)], minIoU: CGFloat = 0.5
+    ) -> [Int?] {
+        var assignment = [Int?](repeating: nil, count: faces.count)
+        var used = Set<Int>()
+        for (f, face) in faces.enumerated() {
+            if let c = candidates.indices.first(where: { !used.contains($0) && candidates[$0].id == face.id })
+            {
+                assignment[f] = c
+                used.insert(c)
+            }
+        }
+        var pairs: [(face: Int, candidate: Int, iou: CGFloat)] = []
+        for (f, face) in faces.enumerated() where assignment[f] == nil {
+            for (c, candidate) in candidates.enumerated() where !used.contains(c) {
+                let overlap = iou(face.box, candidate.box)
+                if overlap >= minIoU { pairs.append((f, c, overlap)) }
+            }
+        }
+        // Highest IoU first; index tie-breaks keep the result deterministic.
+        pairs.sort {
+            ($0.iou, -$0.face, -$0.candidate) > ($1.iou, -$1.face, -$1.candidate)
+        }
+        for pair in pairs where assignment[pair.face] == nil && !used.contains(pair.candidate) {
+            assignment[pair.face] = pair.candidate
+            used.insert(pair.candidate)
+        }
+        return assignment
+    }
+
     /// Intersection-over-union of two rects (0 when either is empty).
     static func iou(_ a: CGRect, _ b: CGRect) -> CGFloat {
         let intersection = a.intersection(b)

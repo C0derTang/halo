@@ -68,8 +68,8 @@ private func close(_ a: CGPoint, _ b: CGPoint) -> Bool {
 
 @Suite struct FaceAlignerTests {
     @Test func landmarksDriveTheTransform() throws {
-        // Landmarks are normalized; in a 224x224 image the template points scaled by 2 must map
-        // back onto the template with scale 1/2.
+        // Landmarks are normalized; in a 224x224 image the template points scaled by 2 map onto the
+        // template with scale 1/2, plus the +0.5 px OpenCV pixel-centre shift.
         let size = CGSize(width: 224, height: 224)
         let landmarks = FaceAligner.arcFaceTemplate.map { CGPoint(x: $0.x * 2 / 224, y: $0.y * 2 / 224) }
         let face = FaceObservation(
@@ -78,8 +78,55 @@ private func close(_ a: CGPoint, _ b: CGPoint) -> Bool {
         let t = FaceAligner().transform(for: face, imageSize: size)
         #expect(close(t.scale, 0.5))
         #expect(close(t.rotation, 0))
-        #expect(close(t.tx, 0))
-        #expect(close(t.ty, 0))
+        #expect(close(t.tx, 0.5))
+        #expect(close(t.ty, 0.5))
+    }
+
+    @Test func alignmentTargetIsTemplateShiftedHalfAPixel() {
+        #expect(FaceAligner.openCVPixelCentreOffset == 0.5)
+        for (target, template) in zip(FaceAligner.alignmentTarget, FaceAligner.arcFaceTemplate) {
+            #expect(close(target, CGPoint(x: template.x + 0.5, y: template.y + 0.5)))
+        }
+    }
+
+    /// InsightFace parity, sample for sample: `cv2.warpAffine(img, M, (112, 112))` with
+    /// `M = estimate(landmarks_cv, arcface_dst)` fills crop pixel j from source index `M⁻¹(j)`
+    /// (OpenCV pixel i's centre is at i). We fill crop pixel j from continuous point `T⁻¹(j + 0.5)`,
+    /// which is OpenCV index `T⁻¹(j + 0.5) − 0.5`. They must coincide.
+    @Test(arguments: [
+        (1.8, 0.35, CGPoint(x: 140, y: 95)),
+        (0.7, -0.2, CGPoint(x: 31.25, y: 12.5)),
+        (3.1, 2.6, CGPoint(x: 400, y: 380)),
+    ])
+    func samplingMatchesOpenCVWarpAffine(scale: Double, rotation: Double, translation: CGPoint) throws {
+        let size = CGSize(width: 640, height: 480)
+        let place = SimilarityTransform(scale: scale, rotation: rotation, translation: translation)
+        // A slightly asymmetric face so the fit is least-squares, not exact.
+        let continuous = FaceAligner.arcFaceTemplate.enumerated().map { i, p in
+            place.apply(CGPoint(x: p.x + CGFloat(i % 2) * 0.7, y: p.y - CGFloat(i % 3) * 0.4))
+        }
+        let face = FaceObservation(
+            boundingBox: CGRect(x: 0.1, y: 0.1, width: 0.5, height: 0.5), quality: 1,
+            landmarks: continuous.map { CGPoint(x: $0.x / size.width, y: $0.y / size.height) }, timestamp: 0)
+        let ours = FaceAligner().transform(for: face, imageSize: size)
+
+        let openCVLandmarks = continuous.map { CGPoint(x: $0.x - 0.5, y: $0.y - 0.5) }
+        let m = try #require(
+            SimilarityTransform.estimate(from: openCVLandmarks, to: FaceAligner.arcFaceTemplate))
+
+        for j in [CGPoint(x: 0, y: 0), CGPoint(x: 55, y: 71), CGPoint(x: 111, y: 111), CGPoint(x: 7, y: 100)]
+        {
+            let viaOpenCV = inverse(m).apply(j)
+            let viaOurs = inverse(ours).apply(CGPoint(x: j.x + 0.5, y: j.y + 0.5))
+            #expect(close(CGPoint(x: viaOurs.x - 0.5, y: viaOurs.y - 0.5), viaOpenCV), "crop pixel \(j)")
+        }
+    }
+
+    private func inverse(_ t: SimilarityTransform) -> SimilarityTransform {
+        let n = t.a * t.a + t.b * t.b
+        let a = t.a / n
+        let b = -t.b / n
+        return SimilarityTransform(a: a, b: b, tx: -(a * t.tx - b * t.ty), ty: -(b * t.tx + a * t.ty))
     }
 
     @Test func missingLandmarksFallBackToPaddedBox() {
