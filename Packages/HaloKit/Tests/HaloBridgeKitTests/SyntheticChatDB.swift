@@ -82,25 +82,39 @@ final class SyntheticChatDB {
         }
     }
 
-    func addMessage(chat: Int64, handle: Int64, fromMe: Bool, rawDate: Int64) throws {
+    /// `text`/`body` default to `secretText` (raw bytes in `attributedBody`, as in v1 tests); pass
+    /// a typedstream blob from `TypedStreamWriter` for realistic bodies.
+    func addMessage(
+        chat: Int64, handle: Int64, fromMe: Bool, rawDate: Int64,
+        text: (any DatabaseValueConvertible)? = SyntheticChatDB.secretText,
+        body: (any DatabaseValueConvertible)? = Data(SyntheticChatDB.secretText.utf8)
+    ) throws {
         try queue.write { db in
             try db.execute(
                 sql:
                     "INSERT INTO message (guid, text, attributedBody, handle_id, is_from_me, date) VALUES (?, ?, ?, ?, ?, ?)",
-                arguments: [
-                    UUID().uuidString, Self.secretText, Data(Self.secretText.utf8), handle, fromMe ? 1 : 0,
-                    rawDate,
-                ])
+                arguments: [UUID().uuidString, text, body, handle, fromMe ? 1 : 0, rawDate])
             let id = db.lastInsertedRowID
             try db.execute(sql: "INSERT INTO chat_message_join VALUES (?, ?)", arguments: [chat, id])
         }
     }
 
     /// Message at a Unix time, stored as Apple-epoch nanoseconds (modern macOS) or seconds.
-    func addMessage(chat: Int64, handle: Int64, fromMe: Bool, at date: Date, nanoseconds: Bool = true) throws
-    {
+    func addMessage(
+        chat: Int64, handle: Int64, fromMe: Bool, at date: Date, nanoseconds: Bool = true,
+        text: (any DatabaseValueConvertible)? = SyntheticChatDB.secretText,
+        body: (any DatabaseValueConvertible)? = Data(SyntheticChatDB.secretText.utf8)
+    ) throws {
         let secs = Int64(date.timeIntervalSince1970 - AppleDate.appleEpochOffset)
         try addMessage(
-            chat: chat, handle: handle, fromMe: fromMe, rawDate: nanoseconds ? secs * 1_000_000_000 : secs)
+            chat: chat, handle: handle, fromMe: fromMe, rawDate: nanoseconds ? secs * 1_000_000_000 : secs,
+            text: text, body: body)
+    }
+
+    /// A message stored the modern way: `text` NULL, content only in a typedstream `attributedBody`.
+    func addBodyMessage(chat: Int64, handle: Int64, fromMe: Bool, at date: Date, _ content: String) throws {
+        try addMessage(
+            chat: chat, handle: handle, fromMe: fromMe, at: date, text: nil,
+            body: TypedStreamWriter.attributedBody(content))
     }
 }

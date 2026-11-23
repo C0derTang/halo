@@ -4,17 +4,21 @@ import HaloCore
 /// Hand-rolled argument parsing for `halo-bridge` (ArgumentParser is not available).
 ///
 /// Invariant 6: the only way to write the digest unencrypted is the explicit debug command
-/// `digest --plaintext`. `export` always seals to the paired phone's key.
+/// `digest --plaintext`. `export` always seals to the paired phone's key. Message text is opt-in
+/// (`--with-messages`, off by default) and, unencrypted, additionally needs
+/// `--i-understand-plaintext`. Message text is never printed.
 public enum BridgeCLI {
     public static let usage = """
         usage:
           halo-bridge pair <payload>
               Pair with the phone whose pairing QR payload is <payload> (stored in the Keychain).
-          halo-bridge export --out <file>.halodigest [--db <chat.db>] [--now <iso8601>] [--region <US|GB|...>]
+          halo-bridge export --out <file>.halodigest [--with-messages] [--db <chat.db>] [--now <iso8601>] [--region <US|GB|...>]
               Read chat.db and write the digest encrypted to the paired phone.
-          halo-bridge digest --plaintext --out <file> [--db <chat.db>] [--now <iso8601>] [--region <US|GB|...>]
+          halo-bridge digest --plaintext --out <file> [--with-messages --i-understand-plaintext] [--db <chat.db>] [--now <iso8601>] [--region <US|GB|...>]
               DEBUG ONLY: write the digest as UNENCRYPTED JSON.
         --region defaults to this Mac's region.
+        --with-messages (off by default) also includes recent message TEXT: per 1:1 conversation, up to
+          20 messages from the last 30 days, newest first, each cut to 500 characters.
         """
 
     struct DigestOptions: Equatable {
@@ -25,6 +29,10 @@ public enum BridgeCLI {
         var region: String
         /// True when neither `--region` nor the Mac locale supplied a region.
         var regionMissing = false
+        /// Opt-in: include recent message text (`--with-messages`). Off by default.
+        var withMessages = false
+        /// Debug-only acknowledgement that `digest --plaintext --with-messages` writes text unencrypted.
+        var acknowledgedPlaintextMessages = false
     }
 
     enum Command: Equatable {
@@ -67,8 +75,14 @@ public enum BridgeCLI {
                         "digest writes UNENCRYPTED JSON and needs --plaintext (debug only); use 'export' instead"
                 )
             }
-            return .plaintextDigest(
-                try parseDigestOptions(rest, allowPlaintext: true, defaultRegion: defaultRegion))
+            let o = try parseDigestOptions(rest, allowPlaintext: true, defaultRegion: defaultRegion)
+            guard !o.withMessages || o.acknowledgedPlaintextMessages else {
+                throw UsageError(
+                    message:
+                        "digest --plaintext --with-messages would write message TEXT unencrypted; add --i-understand-plaintext (debug only) or use 'export --with-messages'"
+                )
+            }
+            return .plaintextDigest(o)
         default:
             throw UsageError(message: "expected subcommand 'pair', 'export' or 'digest'")
         }
@@ -81,6 +95,8 @@ public enum BridgeCLI {
         var out: String?
         var now: Date?
         var region: String?
+        var withMessages = false
+        var acknowledged = false
         var i = 0
         func value(_ flag: String) throws -> String {
             i += 1
@@ -93,6 +109,8 @@ public enum BridgeCLI {
             case "--out": out = try value("--out")
             case "--region": region = try value("--region")
             case "--plaintext" where allowPlaintext: break
+            case "--with-messages": withMessages = true
+            case "--i-understand-plaintext" where allowPlaintext: acknowledged = true
             case "--now":
                 let s = try value("--now")
                 guard let d = ISO8601DateFormatter().date(from: s) else {
@@ -113,14 +131,20 @@ public enum BridgeCLI {
             regionMissing: region == nil && defaultRegion == nil)
         if let db { o.db = URL(fileURLWithPath: (db as NSString).expandingTildeInPath) }
         if let now { o.now = now }
+        o.withMessages = withMessages
+        o.acknowledgedPlaintextMessages = acknowledged
         return o
     }
 
     static func buildDigest(_ o: DigestOptions) throws -> InteractionDigest {
         let reader = try ChatDatabaseReader(url: o.db)
         let records = try reader.messageRecords()
+        let excerpts =
+            o.withMessages
+            ? try reader.recentMessageExcerpts(since: o.now.addingTimeInterval(-MessageExcerptPolicy.window))
+            : nil
         return DigestBuilder(normalizer: HandleNormalizer(region: o.region)).build(
-            records: records, now: o.now)
+            records: records, excerpts: excerpts, now: o.now)
     }
 
     public static func encoder() -> JSONEncoder { DigestCoding.encoder() }
@@ -153,15 +177,24 @@ public enum BridgeCLI {
                 // Check pairing before touching chat.db.
                 guard let phone = try PairedPhone.load(from: keyStore) else { throw PairingError.notPaired }
                 warnOnUnknownRegion(o, errorOutput)
+                if o.withMessages {
+                    errorOutput(withMessagesNotice(sealedTo: "phone key \(phone.keyID)"))
+                }
                 let digest = try buildDigest(o)
                 let envelope = try DigestEnvelope.seal(digest, normalizerRegion: o.region, to: phone)
                 try SecureFileWriter.write(envelope.serialized, to: URL(fileURLWithPath: o.out))
+                let excerpts = o.withMessages ? ", with message excerpts" : ""
                 output(
-                    "Wrote \(o.out): \(digest.entries.count) conversations, sealed to phone key \(phone.keyID), region \(o.region)."
+                    "Wrote \(o.out): \(digest.entries.count) conversations\(excerpts), sealed to phone key \(phone.keyID), region \(o.region)."
                 )
             case .plaintextDigest(let o):
                 warnOnUnknownRegion(o, errorOutput)
                 errorOutput("halo-bridge: WARNING: writing UNENCRYPTED digest (debug only): \(o.out)")
+                if o.withMessages {
+                    errorOutput(
+                        "halo-bridge: WARNING: --i-understand-plaintext: this file will contain message TEXT, UNENCRYPTED. Delete it after debugging."
+                    )
+                }
                 let data = try DigestCoding.encoder().encode(try buildDigest(o))
                 try SecureFileWriter.write(data, to: URL(fileURLWithPath: o.out))
             }
@@ -176,6 +209,17 @@ public enum BridgeCLI {
             errorOutput("halo-bridge: \(error)")
             return 1
         }
+    }
+
+    /// What `--with-messages` adds, printed before chat.db is read. Never contains message text.
+    static func withMessagesNotice(sealedTo recipient: String) -> String {
+        """
+        halo-bridge: --with-messages: this digest will include message TEXT. For each 1:1 conversation: \
+        up to \(MessageExcerptPolicy.maxPerHandle) of the newest messages from the last \
+        \(Int(MessageExcerptPolicy.window / 86_400)) days, each cut to \(MessageExcerptPolicy.maxCharacters) \
+        characters. Group chats, tapbacks and attachment-only messages are left out. The text is sealed \
+        inside the encrypted envelope for \(recipient) and is never written unencrypted or printed.
+        """
     }
 
     static func warnOnUnknownRegion(_ o: DigestOptions, _ errorOutput: (String) -> Void) {
