@@ -233,6 +233,24 @@ import Testing
         #expect(h.environment.galleryPersonCount == 1)
     }
 
+    @Test func overlappingStartsLeaveTheLensRunning() async throws {
+        let cameraGate = EnvGate()
+        let h = try EnvHarness(cameraStartGate: cameraGate)
+        await h.environment.start()
+        let first = Task { try await h.environment.startLens() }
+        let second = Task { try await h.environment.startLens() }
+        try await waitUntil { h.log.count("camera.start") == 2 }
+
+        cameraGate.open()
+        try await first.value
+        try await second.value
+
+        #expect(h.environment.isLensRunning)
+        #expect(h.log.count("camera.stop") == 0)
+        let camera = try #require(h.environment.camera as? EnvFakeCamera)
+        #expect(camera.isRunning)
+    }
+
     @Test func stopDuringCameraStartWins() async throws {
         let cameraGate = EnvGate()
         let h = try EnvHarness(cameraStartGate: cameraGate)
@@ -248,6 +266,7 @@ import Testing
         // Stopped by stopLens, and again by startLens once the camera came up late.
         #expect(h.log.count("camera.stop") == 2)
         #expect(h.log.events.last == "camera.stop")
+        #expect(try #require(h.environment.camera as? EnvFakeCamera).isRunning == false)
     }
 
     @Test func everyActiveRetriesTheGalleryRebuild() async throws {

@@ -202,11 +202,19 @@ final class EnvFakeCamera: AppCamera {
         self.log = log
         self.startGate = startGate
     }
+    private let running = Mutex(false)
+    /// Like the real session: running after a completed start, until the next stop.
+    var isRunning: Bool { running.withLock { $0 } }
+
     func start() async throws {
         log.record("camera.start")
         await startGate?.wait()
+        running.withLock { $0 = true }
     }
-    func stop() { log.record("camera.stop") }
+    func stop() {
+        log.record("camera.stop")
+        running.withLock { $0 = false }
+    }
 }
 
 struct EnvFakeAuthenticator: Authenticating {

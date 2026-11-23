@@ -93,8 +93,8 @@ public final class AppEnvironment {
     /// People being or already forgotten. Owned here (not only by the refresher) so a refresher
     /// created while a forget is in flight (e.g. during model load) starts with them excluded.
     @ObservationIgnored private var excludedPeople: Set<PersonID> = []
-    /// Bumped by every `startLens` / `stopLens`. A start whose camera came up after a later stop
-    /// sees a different token and stops the camera again.
+    /// Bumped only by `stopLens`. A start whose camera came up after a later stop sees a different
+    /// token and stops the camera again; overlapping starts share a token and both succeed.
     @ObservationIgnored private var lensToken = 0
 
     public init(dependencies: AppDependencies) {
@@ -258,11 +258,10 @@ public final class AppEnvironment {
     /// background.
     public func startLens() async throws {
         guard let camera, phase != .background else { return }
-        lensToken += 1
-        let token = lensToken
+        let token = lensToken  // read only: overlapping starts must not invalidate each other
         try await camera.start()
-        // A stop (or another start) while the camera was coming up wins: the camera may have
-        // started after that stop was issued, so stop it again.
+        // A stop while the camera was coming up wins: the camera may have started after that stop
+        // was issued, so stop it again.
         guard token == lensToken, phase != .background else {
             camera.stop()
             return
