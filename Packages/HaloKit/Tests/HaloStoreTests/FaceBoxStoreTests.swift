@@ -64,4 +64,36 @@ import Testing
         #expect(old.vector == [1, 2, 3, 4])
         #expect(old.sourceRef == "old-ref")
     }
+
+    @Test(arguments: [
+        // (input, expected stored box)
+        (CGRect(x: -0.25, y: 0.5, width: 0.75, height: 0.25), CGRect(x: 0, y: 0.5, width: 0.5, height: 0.25)),
+        (CGRect(x: 0.5, y: 0.5, width: 2, height: 2), CGRect(x: 0.5, y: 0.5, width: 0.5, height: 0.5)),
+        (CGRect(x: 0, y: 0, width: 1, height: 1), CGRect(x: 0, y: 0, width: 1, height: 1)),
+    ])
+    func faceBoxIsClampedToUnitSquare(input: CGRect, expected: CGRect) async throws {
+        let store = try PeopleStore.inMemory()
+        var embedding = Fixture.embedding(for: nil, seed: 0.5)
+        embedding.faceBox = input
+        try await store.addEmbeddings([embedding])
+        #expect(try await store.embeddings(ids: [embedding.id]).first?.faceBox == expected)
+    }
+
+    @Test(arguments: [
+        CGRect(x: Double.nan, y: 0, width: 0.5, height: 0.5),
+        CGRect(x: 0, y: 0, width: Double.infinity, height: 0.5),
+        CGRect(x: 0.1, y: 0.1, width: 0, height: 0.5),
+        CGRect(x: 0.1, y: 0.1, width: -0.2, height: 0.5),
+        CGRect(x: 1.5, y: 0.1, width: 0.2, height: 0.2),
+        CGRect(x: -3, y: -3, width: 1, height: 1),
+    ])
+    func invalidFaceBoxIsStoredAsNilButEmbeddingIsKept(box: CGRect) async throws {
+        let store = try PeopleStore.inMemory()
+        var embedding = Fixture.embedding(for: nil, seed: 0.5)
+        embedding.faceBox = box
+        try await store.addEmbeddings([embedding])
+        let loaded = try #require(try await store.embeddings(ids: [embedding.id]).first)
+        #expect(loaded.faceBox == nil)
+        #expect(loaded.vector == embedding.vector)
+    }
 }

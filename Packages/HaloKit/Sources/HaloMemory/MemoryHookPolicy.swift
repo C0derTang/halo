@@ -38,12 +38,33 @@ public enum MemoryHookPolicy {
         let lowered = text.lowercased()
         if lowered.contains("://") || lowered.contains("www.") || lowered.contains("@") { return true }
         let patterns = [
-            // Domain-like token: "acme.com", "news.example.co".
-            #"[a-z0-9-]+\.[a-z]{2,}\b"#,
             // Five or more digits, optionally separated by single spaces, dots, dashes or parens.
-            #"\d(?:[\s().-]?\d){4,}"#,
+            #"\d(?:[\s().-]?\d){4,}"#
         ]
+        if containsDomainLikeToken(lowered) { return true }
         return patterns.contains { lowered.range(of: $0, options: .regularExpression) != nil }
+    }
+
+    /// Suffixes of dotted tokens that are language / framework / file names, not sites ("Node.js").
+    /// Everything else after a dot ("acme.com", "acme.pro", "bob.xxx") is treated as a link.
+    static let exemptSuffixes: Set<String> = [
+        "js", "jsx", "ts", "tsx", "py", "rb", "rs", "go", "kt", "sh", "md", "cs", "swift", "java", "php",
+        "cpp", "hs", "ex", "exs", "lua", "json", "yml", "yaml", "toml", "html", "css", "txt", "pdf",
+        "png", "jpg", "gif", "csv",
+    ]
+
+    /// True for any `word.suffix` token whose suffix is not in `exemptSuffixes`. Scanning resumes at
+    /// the START of each suffix, so chained tokens ("x.js.com", "blog.joe.com") are all examined.
+    static func containsDomainLikeToken(_ lowered: String) -> Bool {
+        var rest = lowered[...]
+        while let range = rest.range(of: #"[a-z0-9-]+\.[a-z]{2,}\b"#, options: .regularExpression) {
+            let token = rest[range]
+            guard let dot = token.lastIndex(of: ".") else { return true }
+            let suffixStart = token.index(after: dot)
+            if !exemptSuffixes.contains(String(token[suffixStart...])) { return true }
+            rest = rest[suffixStart...]
+        }
+        return false
     }
 
     /// Builds the stored hooks for `person` from generated texts, enforcing the policy: sanitized
@@ -93,11 +114,43 @@ public enum SensitiveTopicFilter {
     static let exactOnly: Set<String> = [
         "ill", "god", "owe", "owes", "owed", "std", "aids", "laid", "broke", "sex", "gay", "rent",
         "stock", "bills", "tax", "ivf", "hiv", "sikh", "wage", "trans", "meds", "died", "flu", "imam",
-        "cash",
+        "cash", "rabbi",
     ]
 
     /// Money amounts like "50k", "2.5m", "3bn".
-    static let amountPattern = #"\b\d+(?:[.,]\d+)?\s?(?:k|m|bn|mil)\b"#
+    static let amountPattern = #"\b(\d+(?:[.,]\d+)?)\s?(k|m|bn|mil)\b"#
+
+    /// Race distances ("a 5k", "the 10k") that are not money when written with an article.
+    static let raceDistancesK: Set<String> = ["5", "10", "15", "21", "42"]
+
+    /// A word right after "5k" that makes it money again ("a 5k raise").
+    static let moneyWords: Set<String> = [
+        "raise", "bonus", "salary", "loan", "fee", "fine", "bill", "tip", "rent", "debt", "price",
+        "pay", "payment", "income", "mortgage", "budget", "cost", "fees", "bills", "tips",
+    ]
+
+    /// True when the text contains a money-looking amount. A "k" amount is NOT money when it is
+    /// followed by "run"/"race" ("5k run"), or is a standard race distance preceded by "a"/"the"
+    /// ("ran a 10k"). Deliberately narrower than "any k after a/the": "got a 50k raise" stays sensitive.
+    static func containsMoneyAmount(_ lowered: String) -> Bool {
+        guard let regex = try? NSRegularExpression(pattern: amountPattern) else { return true }
+        let ns = lowered as NSString
+        for match in regex.matches(in: lowered, range: NSRange(location: 0, length: ns.length)) {
+            let number = ns.substring(with: match.range(at: 1))
+            let unit = ns.substring(with: match.range(at: 2))
+            guard unit == "k" else { return true }
+            let after = lowered[Range(match.range, in: lowered)!.upperBound...]
+                .split(whereSeparator: { !$0.isLetter }).first.map(String.init)
+            guard raceDistancesK.contains(number) else { return true }
+            if let after, moneyWords.contains(after) { return true }
+            if after == "run" || after == "runs" || after == "race" || after == "races" { continue }
+            let before = lowered[..<Range(match.range, in: lowered)!.lowerBound]
+                .split(whereSeparator: { !$0.isLetter }).last.map(String.init)
+            if before == "a" || before == "the" { continue }
+            return true
+        }
+        return false
+    }
 
     /// Characters that on their own mark a money detail.
     static let currencySymbols: Set<Character> = ["$", "€", "£", "¥", "₹", "₩", "₽", "₿"]
@@ -105,7 +158,7 @@ public enum SensitiveTopicFilter {
     public static func isSensitive(_ text: String) -> Bool {
         if text.contains(where: { currencySymbols.contains($0) }) { return true }
         let lowered = text.lowercased()
-        if lowered.range(of: amountPattern, options: .regularExpression) != nil { return true }
+        if containsMoneyAmount(lowered) { return true }
         // Match both the hyphen-joined form ("non-binary" -> "nonbinary") and each part
         // ("ex-boyfriend" -> "boyfriend").
         let split: (String) -> [String] = {
@@ -117,7 +170,9 @@ public enum SensitiveTopicFilter {
         // Space-separated compounds ("non binary") are matched as exact whole stems only, so
         // prefix stems cannot fire across a word boundary ("the rapids" is not "therap...").
         let stemSet = Set(stems)
-        for (a, b) in zip(parts, parts.dropFirst()) where stemSet.contains(a + b) { return true }
+        // Single-letter words are never joined ("a ids" is not "aids").
+        for (a, b) in zip(parts, parts.dropFirst())
+        where a.count > 1 && b.count > 1 && stemSet.contains(a + b) { return true }
         let words = Set(parts + split(joined))
         for word in words {
             for stem in stems {

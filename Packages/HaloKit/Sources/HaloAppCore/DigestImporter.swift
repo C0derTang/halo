@@ -55,6 +55,9 @@ public struct DigestImportReport: Equatable, Sendable {
     /// Entries whose handle resolved to exactly one known person.
     public var resolvedPeople: Int
     public var generatedAt: Date
+    /// Entries dropped because their handle is a bare phone-like number from a sender region this
+    /// app cannot normalize (ambiguous: a missed match beats a wrong one).
+    public var droppedAmbiguous: Int = 0
 }
 
 /// Phone side of the iMessage bridge: opens a `.halodigest` with the Keychain pairing key and saves
@@ -142,7 +145,8 @@ public struct DigestImporter: Sendable {
             throw DigestImportError.unsupportedVersion
         }
 
-        let digest = Self.renormalized(opened.digest, region: opened.normalizerRegion)
+        let (digest, droppedAmbiguous) = Self.renormalizedCountingDropped(
+            opened.digest, region: opened.normalizerRegion)
         if let stored = try? await store.latestDigest(), digest.generatedAt < stored.generatedAt {
             throw DigestImportError.staleDigest
         }
@@ -157,7 +161,8 @@ public struct DigestImporter: Sendable {
             if let id = try? await resolver.resolve(entry) { resolved.insert(id) }
         }
         return DigestImportReport(
-            entryCount: digest.entries.count, resolvedPeople: resolved.count, generatedAt: digest.generatedAt)
+            entryCount: digest.entries.count, resolvedPeople: resolved.count, generatedAt: digest.generatedAt,
+            droppedAmbiguous: droppedAmbiguous)
     }
 
     static func map(_ error: DigestEnvelopeError) -> DigestImportError {
@@ -171,13 +176,24 @@ public struct DigestImporter: Sendable {
     }
 
     static func renormalized(_ digest: InteractionDigest, region: String) -> InteractionDigest {
+        renormalizedCountingDropped(digest, region: region).digest
+    }
+
+    /// `renormalized` plus how many entries were dropped as ambiguous bare numbers.
+    static func renormalizedCountingDropped(_ digest: InteractionDigest, region: String)
+        -> (digest: InteractionDigest, dropped: Int)
+    {
+        var dropped = 0
         let normalizer = HandleNormalizer(region: region)
         let known = HandleNormalizer.isKnownRegion(region)
         var merged: [String: InteractionDigest.Entry] = [:]
         var order: [String] = []
         for entry in digest.entries {
             let handle = normalizer.normalize(entry.handle)
-            if !known, isBarePhoneLike(handle) { continue }
+            if !known, isBarePhoneLike(handle) {
+                dropped += 1
+                continue
+            }
             var e = entry
             e.handle = handle
             if let existing = merged[handle] {
@@ -189,7 +205,7 @@ public struct DigestImporter: Sendable {
         }
         var out = digest
         out.entries = order.compactMap { merged[$0] }
-        return out
+        return (out, dropped)
     }
 
     private static func merge(_ a: InteractionDigest.Entry, _ b: InteractionDigest.Entry)
