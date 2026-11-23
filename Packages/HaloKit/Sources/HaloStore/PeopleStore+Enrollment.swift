@@ -37,15 +37,26 @@ extension PeopleStore {
         }
     }
 
-    /// Atomically replaces every stored cluster with `clusters` (kept in this order). Throws
-    /// `invalidCluster` and stores nothing if any cluster is empty, has a representative outside its
-    /// members, repeats an embedding, names an unknown or already-assigned embedding, or suggests a
-    /// person that does not exist.
+    /// Atomically replaces every stored cluster with `clusters` (kept in this order).
+    ///
+    /// Caller bugs throw `invalidCluster` and store nothing: a repeated cluster ID, a cluster passed
+    /// with no members, a representative outside its members, or an embedding listed twice.
+    ///
+    /// State that went stale while the scan was clustering (the user triaged or forgot someone
+    /// meanwhile) is pruned in the same transaction instead, so a concurrent scan never aborts:
+    /// - members that no longer exist or already belong to a person are dropped, so stored clusters
+    ///   only ever hold unassigned faces (invariant 3);
+    /// - a representative that was dropped is re-pointed at the first remaining member;
+    /// - a cluster left with no members is dropped;
+    /// - a cluster whose suggested person no longer exists (forgotten mid-scan) is dropped together
+    ///   with its member embeddings, exactly as `forget` would have deleted it.
     public func replaceClusters(_ clusters: [ClusterRecord]) async throws {
         try await write { db in
             try db.execute(sql: "DELETE FROM cluster")
             let embeddingOwner = try db.cachedStatement(sql: "SELECT personId FROM embedding WHERE id = ?")
             let personExists = try db.cachedStatement(sql: "SELECT 1 FROM person WHERE id = ?")
+            let deleteUnassigned = try db.cachedStatement(
+                sql: "DELETE FROM embedding WHERE id = ? AND personId IS NULL")
             let insertCluster = try db.cachedStatement(
                 sql: """
                     INSERT INTO cluster (id, position, representativeId, suggestedPersonId, cohesion)
@@ -64,23 +75,39 @@ extension PeopleStore {
                 guard cluster.memberIDs.contains(cluster.representativeID) else {
                     throw invalid(.representativeNotMember)
                 }
+                for member in cluster.memberIDs {
+                    guard seenMembers.insert(member).inserted else { throw invalid(.duplicateMember(member)) }
+                }
+
+                // Prune stale state: keep only members that still exist and are still unassigned.
+                var members: [UUID] = []
+                for member in cluster.memberIDs {
+                    if let row = try Row.fetchOne(embeddingOwner, arguments: [member.uuidString]),
+                        (row["personId"] as String?) == nil
+                    {
+                        members.append(member)
+                    }
+                }
                 if let suggested = cluster.suggestedPersonID,
                     try Row.fetchOne(personExists, arguments: [suggested.description]) == nil
                 {
-                    throw invalid(.unknownSuggestedPerson(suggested))
-                }
-                for member in cluster.memberIDs {
-                    guard seenMembers.insert(member).inserted else { throw invalid(.duplicateMember(member)) }
-                    guard let row = try Row.fetchOne(embeddingOwner, arguments: [member.uuidString]) else {
-                        throw invalid(.unknownMember(member))
+                    // Forgotten mid-scan: these faces are most likely that person. Delete them, as
+                    // forget deletes the clusters that suggested the person and their members.
+                    for member in members {
+                        try deleteUnassigned.execute(arguments: [member.uuidString])
                     }
-                    guard (row["personId"] as String?) == nil else { throw invalid(.assignedMember(member)) }
+                    if !members.isEmpty { self.markErasurePending() }
+                    continue
                 }
+                guard let firstMember = members.first else { continue }
+                let representative =
+                    members.contains(cluster.representativeID) ? cluster.representativeID : firstMember
+
                 try insertCluster.execute(arguments: [
-                    cluster.id, position, cluster.representativeID.uuidString,
+                    cluster.id, position, representative.uuidString,
                     cluster.suggestedPersonID?.description, Double(cluster.cohesion),
                 ])
-                for (memberPosition, member) in cluster.memberIDs.enumerated() {
+                for (memberPosition, member) in members.enumerated() {
                     try insertMember.execute(arguments: [cluster.id, member.uuidString, memberPosition])
                 }
             }

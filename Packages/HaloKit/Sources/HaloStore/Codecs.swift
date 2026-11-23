@@ -16,24 +16,19 @@ public enum PeopleStoreError: Error, Equatable, Sendable {
     /// None of the cluster's member embeddings exist any more (all deleted during triage). The
     /// stale record was deleted and the person was NOT confirmed.
     case emptyCluster(id: String)
-    /// A cluster passed to `replaceClusters` is not a valid suggestion; nothing was stored.
+    /// A cluster passed to `replaceClusters` is malformed (a caller bug); nothing was stored.
+    /// Stale state (deleted/assigned members, a forgotten suggested person) is pruned, not thrown.
     case invalidCluster(id: String, reason: ClusterProblem)
 
     public enum ClusterProblem: Equatable, Sendable {
         /// Two clusters share this ID.
         case duplicateID
-        /// The cluster has no members.
+        /// The cluster was passed with no members.
         case empty
         /// `representativeID` is not one of `memberIDs`.
         case representativeNotMember
         /// The embedding is listed twice (in this cluster or in another one).
         case duplicateMember(UUID)
-        /// No stored embedding has this ID.
-        case unknownMember(UUID)
-        /// The embedding already belongs to a person; clusters may only hold unassigned faces.
-        case assignedMember(UUID)
-        /// `suggestedPersonID` names a person that does not exist (e.g. was just forgotten).
-        case unknownSuggestedPerson(PersonID)
     }
 }
 

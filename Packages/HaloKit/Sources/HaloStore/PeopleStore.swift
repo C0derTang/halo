@@ -14,6 +14,11 @@ import Synchronization
 ///   `PRAGMA secure_delete = ON` so freed pages are zeroed on disk, then fold the WAL back into the
 ///   main file. If a reader blocks that checkpoint, the erasure stays pending and is retried after
 ///   every later write (without waiting for readers) and by `flushPendingErasure()` (waiting).
+///
+/// Latency note: the waiting checkpoint of `forget`, `eraseEverything` and `flushPendingErasure`
+/// runs on the single writer connection, so while a reader blocks it, any ordinary write issued
+/// meanwhile queues behind it for up to `busyTimeout` (default 2 s). Ordinary writes themselves
+/// never wait for readers.
 public final class PeopleStore: PeopleStoring, EnrollmentStoring, PrivacyStoring {
     /// How long a checkpoint/write waits for other connections before giving up.
     public static let defaultBusyTimeout: TimeInterval = 2
@@ -317,6 +322,8 @@ public final class PeopleStore: PeopleStoring, EnrollmentStoring, PrivacyStoring
     }
 
     /// Runs a write transaction, then retries any pending erasure without waiting for readers.
+    /// It can still queue for up to `busyTimeout` behind a concurrent forget/erase/flush checkpoint
+    /// that is waiting on a reader (they share the one writer connection).
     func write<T: Sendable>(
         _ updates: @escaping @Sendable (Database) throws -> T
     ) async throws -> T {

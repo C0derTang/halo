@@ -129,14 +129,11 @@ struct EnrollmentWorld {
         #expect(try await world.store.unassignedEmbeddings(space: Fixture.spaceA) == world.faces)
     }
 
-    @Test func invalidInputIsRejectedAtomically() async throws {
+    @Test func callerBugsAreRejectedAtomically() async throws {
         let world = try await EnrollmentWorld()
         let store = world.store
         let existing = [world.cluster("keep", world.ids(0, 1), suggested: world.known.id)]
         try await store.replaceClusters(existing)
-        let assignedID = try #require(try await store.confirmedGallery(space: Fixture.spaceA).first).id
-        let ghostMember = UUID()
-        let ghostPerson = PersonID()
         let valid = world.cluster("valid", world.ids(2, 3))
 
         var representativeOutside = world.cluster("bad", world.ids(4))
@@ -146,12 +143,6 @@ struct EnrollmentWorld {
             (representativeOutside, .representativeNotMember),
             (world.cluster("bad", world.ids(4, 4)), .duplicateMember(world.faces[4].id)),
             (world.cluster("bad", world.ids(2)), .duplicateMember(world.faces[2].id)),  // also in `valid`
-            (world.cluster("bad", [ghostMember]), .unknownMember(ghostMember)),
-            (world.cluster("bad", [assignedID]), .assignedMember(assignedID)),
-            (
-                world.cluster("bad", world.ids(4), suggested: ghostPerson),
-                .unknownSuggestedPerson(ghostPerson)
-            ),
             (world.cluster("valid", world.ids(4)), .duplicateID),
         ]
         for (bad, problem) in cases {
@@ -162,6 +153,87 @@ struct EnrollmentWorld {
             // Nothing from the failed call was applied; the previous clusters are intact.
             #expect(try await store.clusters() == existing)
         }
+    }
+
+    @Test func deletedMembersArePrunedAndRepresentativeRepointed() async throws {
+        let world = try await EnrollmentWorld()
+        let store = world.store
+        // The scan clustered faces 0-2; the user rejected face 0 (the representative) meanwhile.
+        try await store.deleteEmbeddings(ids: world.ids(0))
+        try await store.replaceClusters([world.cluster("c", world.ids(0, 1, 2))])
+
+        let stored = try #require(try await store.clusters().first)
+        #expect(stored.memberIDs == world.ids(1, 2))
+        #expect(stored.representativeID == world.faces[1].id)
+        #expect(try await store.rowCount("cluster_member") == 2)
+    }
+
+    @Test func membersThatGotAnOwnerArePruned() async throws {
+        let world = try await EnrollmentWorld()
+        let store = world.store
+        // Face 2 was confirmed as the newcomer between clustering and saving.
+        try await store.replaceClusters([world.cluster("first", world.ids(2, 3))])
+        try await store.confirm(cluster: "first", as: world.newcomer.id)
+        let ownedByKnown = try #require(
+            try await store.confirmedGallery(space: Fixture.spaceA).first {
+                $0.personID == world.known.id
+            })
+
+        var stale = world.cluster("c", [ownedByKnown.id] + world.ids(2, 4))
+        stale.representativeID = world.faces[4].id
+        try await store.replaceClusters([stale])
+
+        let stored = try #require(try await store.clusters().first)
+        #expect(stored.memberIDs == world.ids(4))
+        #expect(stored.representativeID == world.faces[4].id)  // still a member: kept
+        // Owned faces were left with their owners.
+        #expect(try await store.embeddings(ids: world.ids(2)).first?.personID == world.newcomer.id)
+        #expect(try await store.embeddings(ids: [ownedByKnown.id]).first?.personID == world.known.id)
+    }
+
+    @Test func clustersLeftEmptyAreDropped() async throws {
+        let world = try await EnrollmentWorld()
+        let store = world.store
+        try await store.deleteEmbeddings(ids: world.ids(0, 1))
+        try await store.replaceClusters([
+            world.cluster("gone", world.ids(0, 1)), world.cluster("ghost", [UUID()]),
+            world.cluster("kept", world.ids(2)),
+        ])
+        #expect(try await store.clusters() == [world.cluster("kept", world.ids(2))])
+    }
+
+    @Test func clusterSuggestingAForgottenPersonIsDroppedWithItsFaces() async throws {
+        let world = try await EnrollmentWorld()
+        let store = world.store
+        // The scan suggested `known`, who the user forgot before the scan saved its clusters.
+        let clusters = [
+            world.cluster("forgotten", world.ids(0, 1), suggested: world.known.id),
+            world.cluster("kept", world.ids(2, 3), suggested: world.newcomer.id),
+            world.cluster("ghost", world.ids(4), suggested: PersonID()),
+        ]
+        try await store.forget(world.known.id)
+        try await store.replaceClusters(clusters)
+
+        #expect(try await store.clusters() == [clusters[1]])
+        #expect(try await store.embeddings(ids: world.ids(0, 1, 4)).isEmpty)
+        #expect(try await store.embeddings(ids: world.ids(2, 3, 5)).count == 3)
+        #expect(try await store.rowsMentioning(world.known.id).values.reduce(0, +) == 0)
+    }
+
+    @Test func forgottenSuggestionFacesAreErasedFromDisk() async throws {
+        let (directory, path) = try Fixture.temporaryDatabasePath()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let world = try await EnrollmentWorld(store: PeopleStore(path: path))
+        let doomed = world.faces[0...1].flatMap(Fixture.needles(for:))
+        try await world.store.forget(world.known.id)
+        #expect(!Fixture.rawTraces(of: doomed, at: path).isEmpty)
+
+        try await world.store.replaceClusters([
+            world.cluster("forgotten", world.ids(0, 1), suggested: world.known.id)
+        ])
+
+        #expect(!world.store.hasPendingErasure)
+        #expect(Fixture.rawTraces(of: doomed, at: path) == [])
     }
 
     @Test func clusterRecordsNeverMakeAnyoneRecognizable() async throws {
