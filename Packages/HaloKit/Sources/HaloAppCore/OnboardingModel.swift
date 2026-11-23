@@ -12,6 +12,8 @@ public enum OnboardingOutcome: Sendable, Equatable {
     case granted
     case limited
     case denied
+    /// The system returned no decision after the request (e.g. restricted or dismissed).
+    case undecided
     case skipped
 }
 
@@ -49,16 +51,30 @@ public final class OnboardingModel {
 
     /// Text shown when a permission was denied, pointing to the Settings app. Never blocks the app.
     public func settingsHint(for permission: OnboardingPermission) -> String? {
-        guard outcomes[permission] == .denied else { return nil }
         let name: String
         switch permission {
         case .camera: name = "Camera"
         case .contacts: name = "Contacts"
         case .photos: name = "Photos"
         }
-        return "\(name) access is off. You can turn it on later in Settings > Halo > \(name)."
+        switch outcomes[permission] {
+        case .denied:
+            return "\(name) access is off. You can turn it on later in Settings > Halo > \(name)."
+        case .undecided:
+            return "\(name) access is not set yet. You can choose later in Settings > Halo > \(name)."
+        case .limited:
+            return permission == .camera ? nil : "Limited \(name) access: Halo only sees what you selected."
+        default:
+            return nil
+        }
     }
 
+    /// True when the Settings app can change the outcome (denied or undecided).
+    public func canOpenSettings(for permission: OnboardingPermission) -> Bool {
+        outcomes[permission] == .denied || outcomes[permission] == .undecided
+    }
+
+    public var contactsAreLimited: Bool { outcomes[.contacts] == .limited }
     public var photosAreLimited: Bool { outcomes[.photos] == .limited }
 
     // MARK: Actions
@@ -106,6 +122,7 @@ public final class OnboardingModel {
 
     /// Skip the permission step we are on, without prompting or doing any work.
     public func skipCurrentStep() {
+        guard !isWorking else { return }
         switch step {
         case .camera:
             outcomes[.camera] = .skipped
@@ -151,7 +168,8 @@ public final class OnboardingModel {
         switch s {
         case .granted: .granted
         case .limited: .limited
-        case .denied, .notDetermined: .denied
+        case .denied: .denied
+        case .notDetermined: .undecided
         }
     }
 }

@@ -51,7 +51,13 @@ public struct SystemPermissionRequester: PermissionRequesting {
         switch s {
         case .authorized: .granted
         case .notDetermined: .notDetermined
-        default: .denied
+        default:
+            #if os(iOS)
+                // `.limited` (iOS 18+) grants access to a user-selected subset of contacts.
+                s == .limited ? .limited : .denied
+            #else
+                .denied
+            #endif
         }
     }
 }

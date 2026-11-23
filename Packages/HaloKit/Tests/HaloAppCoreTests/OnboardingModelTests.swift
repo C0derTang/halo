@@ -143,3 +143,35 @@ private struct Rig {
     #expect(PhotoScanProgress(processed: 1, total: 4).fraction == 0.25)
     #expect(PhotoScanProgress(processed: 1).fraction == nil)
 }
+
+@MainActor @Test func limitedContactsStillImports() async {
+    let r = Rig(results: [.contacts: .limited])
+    r.model.acceptPrivacyExplanation()
+    r.model.skipCurrentStep()
+    await r.model.allowCurrentStep()
+    #expect(r.contacts.calls == 1)
+    #expect(r.model.contactsAreLimited)
+    #expect(r.model.settingsHint(for: .contacts)?.contains("Limited") == true)
+}
+
+@MainActor @Test func undecidedIsNeutralNotDenied() async {
+    let r = Rig(results: [.camera: .notDetermined])
+    r.model.acceptPrivacyExplanation()
+    await r.model.allowCurrentStep()
+    #expect(r.model.outcomes[.camera] == .undecided)
+    let hint = r.model.settingsHint(for: .camera) ?? ""
+    #expect(hint.contains("not set yet") && !hint.contains("is off"))
+    #expect(r.model.canOpenSettings(for: .camera))
+    #expect(r.model.step == .contacts)
+}
+
+@MainActor @Test func skipIgnoredWhileWorking() async {
+    let r = Rig()
+    r.model.acceptPrivacyExplanation()
+    let task = Task { await r.model.allowCurrentStep() }
+    await Task.yield()
+    r.model.skipCurrentStep()
+    await task.value
+    #expect(r.model.outcomes[.camera] == .granted)
+    #expect(r.model.step == .contacts)
+}

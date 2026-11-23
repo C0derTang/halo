@@ -1,6 +1,10 @@
 import HaloAppCore
 import SwiftUI
 
+#if canImport(UIKit)
+    import UIKit
+#endif
+
 /// First-run onboarding flow. Thin view over `OnboardingModel`.
 struct OnboardingView: View {
     @State var model: OnboardingModel
@@ -29,12 +33,12 @@ struct OnboardingView: View {
             page(
                 "camera", "Camera",
                 "The lens uses the camera to find faces. Video is processed on device and never uploaded.",
-                hint: model.settingsHint(for: .camera))
+                hint: model.settingsHint(for: .camera), permission: .camera)
         case .contacts:
             page(
                 "person.2", "Contacts",
                 "Halo imports your contacts on device to name the people you know.",
-                hint: model.settingsHint(for: .contacts))
+                hint: model.settingsHint(for: .contacts), permission: .contacts)
             if let count = model.importedContactCount {
                 Text("Imported \(count) contacts").font(.headline)
             }
@@ -45,7 +49,7 @@ struct OnboardingView: View {
             page(
                 "photo.on.rectangle", "Photos",
                 "Halo scans your photos on device to suggest people. Nothing is named until you confirm.",
-                hint: model.settingsHint(for: .photos))
+                hint: model.settingsHint(for: .photos), permission: .photos)
             scanStatus
         case .bridge:
             page(
@@ -96,7 +100,10 @@ struct OnboardingView: View {
         }
     }
 
-    private func page(_ symbol: String, _ title: String, _ text: String, hint: String? = nil)
+    private func page(
+        _ symbol: String, _ title: String, _ text: String, hint: String? = nil,
+        permission: OnboardingPermission? = nil
+    )
         -> some View
     {
         VStack(spacing: 12) {
@@ -104,6 +111,11 @@ struct OnboardingView: View {
             Text(title).font(.title.bold()).accessibilityAddTraits(.isHeader)
             Text(text).multilineTextAlignment(.center).foregroundStyle(.secondary)
             if let hint { Text(hint).font(.footnote).foregroundStyle(.orange) }
+            if let permission, model.canOpenSettings(for: permission),
+                let url = URL(string: UIApplication.openSettingsURLString)
+            {
+                Link("Open Settings", destination: url)
+            }
         }
         .accessibilityElement(children: .combine)
     }

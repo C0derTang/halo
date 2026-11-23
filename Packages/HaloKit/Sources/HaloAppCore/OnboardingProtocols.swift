@@ -8,7 +8,7 @@ public enum OnboardingPermission: String, Sendable, CaseIterable {
 public enum PermissionStatus: Sendable, Equatable {
     case notDetermined
     case granted
-    /// Photos only: access to a user-selected subset.
+    /// Photos and contacts: access to a user-selected subset.
     case limited
     case denied
 
@@ -55,6 +55,7 @@ public protocol OnboardingCompletionStoring: Sendable {
     func markCompleted()
 }
 
+/// `UserDefaults` is documented thread-safe but not annotated `Sendable` in the SDK, hence `@unchecked`.
 public struct UserDefaultsOnboardingStore: OnboardingCompletionStoring, @unchecked Sendable {
     public static let key = "halo.onboarding.completed"
     private let defaults: UserDefaults
