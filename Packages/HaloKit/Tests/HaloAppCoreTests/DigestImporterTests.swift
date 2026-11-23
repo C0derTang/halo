@@ -180,6 +180,14 @@ private func expectImportError(
         let handles = try #require(await h.store.saved.first).entries.map(\.handle)
         #expect(handles == ["+15551230001", "a@b.co"])
         #expect(report.entryCount == 2)
+        #expect(report.droppedAmbiguous == 1)
+    }
+
+    @Test func knownRegionDropsNothing() async throws {
+        let h = try Harness()
+        let data = try h.sealed(digest([entry("(555) 123-0001"), entry("a@b.co")]), region: "US")
+        let report = try await h.importer.importDigest(data: data)
+        #expect(report.droppedAmbiguous == 0)
     }
 
     @Test func staleDigestRejectedAndFileDeleted() async throws {

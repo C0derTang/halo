@@ -60,8 +60,12 @@ let package = Package(
         .target(
             name: "HaloBridgeKit", dependencies: ["HaloCore", .product(name: "GRDB", package: "GRDB.swift")]),
         .executableTarget(name: "halo-bridge", dependencies: ["HaloBridgeKit"]),
+        // Pure calibration math (ROC/FAR, threshold selection, margin stats, voting simulation).
+        .target(name: "HaloCalibrateKit", dependencies: ["HaloCore", "HaloMatching"]),
         // macOS-only threshold calibration on public face-verification pairs (never personal photos).
-        .executableTarget(name: "halo-calibrate", dependencies: ["HaloCore", "HaloVision", "HaloMatching"]),
+        .executableTarget(
+            name: "halo-calibrate",
+            dependencies: ["HaloCore", "HaloVision", "HaloMatching", "HaloCalibrateKit"]),
 
         .testTarget(name: "HaloCoreTests", dependencies: ["HaloCore"]),
         .testTarget(name: "HaloStoreTests", dependencies: ["HaloStore", "HaloCore"]),
@@ -72,6 +76,7 @@ let package = Package(
         .testTarget(name: "HaloImportTests", dependencies: ["HaloImport", "HaloCore"]),
         .testTarget(name: "HaloUITests", dependencies: ["HaloUI", "HaloCore"]),
         .testTarget(name: "HaloLabelsTests", dependencies: ["HaloLabels", "HaloCore"]),
+        .testTarget(name: "HaloCalibrateKitTests", dependencies: ["HaloCalibrateKit", "HaloCore"]),
         .testTarget(name: "HaloMemoryTests", dependencies: ["HaloMemory", "HaloCore"]),
         .testTarget(name: "HaloAppCoreTests", dependencies: ["HaloAppCore", "HaloCore"]),
         .testTarget(name: "HaloLensTests", dependencies: ["HaloLens", "HaloCore"]),

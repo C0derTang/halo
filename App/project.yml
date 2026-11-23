@@ -45,6 +45,8 @@ targets:
         NSPhotoLibraryUsageDescription: Halo scans your photos on-device to suggest people you know. Faces never leave your device.
         NSContactsUsageDescription: Halo links recognized people to your contacts.
         NSFaceIDUsageDescription: Halo locks your people graph behind Face ID.
+        NSMicrophoneUsageDescription: Halo lets you dictate a Moment. Audio is transcribed on this device and never stored.
+        NSSpeechRecognitionUsageDescription: Halo transcribes Moments on this device only.
         UTExportedTypeDeclarations:
           - UTTypeIdentifier: study.paradigm.halo.digest
             UTTypeDescription: Halo iMessage digest

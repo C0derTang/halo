@@ -238,10 +238,42 @@ import Testing
         let lossy = LosesAvailabilityGenerator(inner: generator)
         let refresher = MemoryHookRefresher(store: store, generator: lossy)
 
-        let report = try report(try await refresher.refresh(now: t0))
+        let first = try report(try await refresher.refresh(now: t0))
 
-        #expect(report.failed == [ana.id])
+        #expect(first.failed.isEmpty)
+        #expect(first.regenerated.isEmpty)
         #expect(await store.allHooks(for: ana.id).map(\.text) == ["Old summary"])
+
+        // Not counted for rate limiting and no failure recorded: the same refresher, default
+        // interval, regenerates one second later once the model is back.
+        await generator.setTexts(["Started a new job at Acme"])
+        await lossy.restore()
+        let again = try report(try await refresher.refresh(now: t0.addingTimeInterval(1)))
+        #expect(again.regenerated == [ana.id])
+        #expect(again.backingOff.isEmpty)
+        #expect(again.failed.isEmpty)
+    }
+
+    @Test func unconfirmedSweepIsFullOnFirstRunThenNarrow() async throws {
+        let (store, generator, ana, ben) = await makeWorld()
+        let refresher = MemoryHookRefresher(store: store, generator: generator, minimumInterval: 0)
+
+        _ = try await refresher.refresh(now: t0)
+        #expect(await store.hookReads.contains(ben.id))
+
+        // Second run: Ben was never confirmed, so nobody needs sweeping.
+        await store.resetHookReads()
+        _ = try await refresher.refresh(now: t0.addingTimeInterval(1))
+        #expect(await store.hookReads.isEmpty)
+
+        // Ana loses confirmation: swept (and cleared) once, then left alone.
+        await store.setConfirmed(ana.id, false)
+        let cleared = try report(try await refresher.refresh(now: t0.addingTimeInterval(2)))
+        #expect(cleared.cleared == [ana.id])
+        #expect(await store.hookReads == [ana.id])
+        await store.resetHookReads()
+        _ = try await refresher.refresh(now: t0.addingTimeInterval(3))
+        #expect(await store.hookReads.isEmpty)
     }
 
     @Test func noDigestIsANoOp() async throws {
@@ -447,6 +479,8 @@ actor LosesAvailabilityGenerator: MemoryHookGenerating {
     private var generated = false
     init(inner: FakeHookGenerator) { self.inner = inner }
     var isAvailable: Bool { !generated }
+    /// The model is back: available again.
+    func restore() { generated = false }
     func hooks(for person: Person, messages: [InteractionDigest.DigestMessage], now: Date) async throws
         -> [MemoryHook]
     {

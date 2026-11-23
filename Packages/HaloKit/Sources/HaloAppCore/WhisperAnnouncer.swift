@@ -110,12 +110,22 @@ public final class WhisperAnnouncer {
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var tapped: Set<PersonID> = []
     @ObservationIgnored private var dismissedDevices: Set<String> = []
+    /// Interrupted attempts per person this session, and when the last one happened.
+    @ObservationIgnored private var interruptions: [PersonID: (count: Int, last: Date)] = [:]
+    @ObservationIgnored private let now: @MainActor () -> Date
+
+    /// An interrupted person is retried at most this many times per lens session.
+    public static let maxInterruptedAttempts = 3
+    /// Minimum wait after an interruption before the person is announced again.
+    public static let retryBackoff: TimeInterval = 5
 
     public init(
         settings: WhisperSettings = WhisperSettings(), route: any AudioRouteChecking,
         devices: any TrustedAudioDeviceStore = InMemoryTrustedAudioDeviceStore(),
-        speech: any WhisperSpeaking, haptics: any WhisperHaptics
+        speech: any WhisperSpeaking, haptics: any WhisperHaptics,
+        now: @escaping @MainActor () -> Date = { Date() }
     ) {
+        self.now = now
         self.settings = settings
         self.route = route
         self.devices = devices
@@ -132,6 +142,11 @@ public final class WhisperAnnouncer {
             let person = label.personID
             if tapped.insert(person).inserted { haptics.tap() }
             guard isPrivate, !announced.contains(person) else { continue }
+            if let interruption = interruptions[person],
+                now().timeIntervalSince(interruption.last) < Self.retryBackoff
+            {
+                continue
+            }
             let name = label.title.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !name.isEmpty else { continue }
             var text = name
@@ -168,6 +183,7 @@ public final class WhisperAnnouncer {
         cancelAll()
         announced.removeAll()
         tapped.removeAll()
+        interruptions.removeAll()
     }
 
     // MARK: - Private
@@ -204,7 +220,13 @@ public final class WhisperAnnouncer {
 
     private func finished(_ token: Int, _ result: WhisperSpeechResult) {
         guard token == generation, let done = current else { return }
-        if result == .interrupted { announced.remove(done.person) }
+        if result == .interrupted {
+            // Re-announce later, but give up after `maxInterruptedAttempts` (the person stays marked
+            // as announced for the rest of the session).
+            let count = (interruptions[done.person]?.count ?? 0) + 1
+            interruptions[done.person] = (count, now())
+            if count < Self.maxInterruptedAttempts { announced.remove(done.person) }
+        }
         current = nil
         pump()
     }

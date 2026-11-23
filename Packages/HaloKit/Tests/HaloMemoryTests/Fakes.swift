@@ -10,6 +10,8 @@ actor FakeMemoryStore: PeopleStoring, MemoryStoring {
     var digest: InteractionDigest?
     var storedHooks: [MemoryHook] = []
     private(set) var replaceCalls: [PersonID] = []
+    private(set) var hookReads: [PersonID] = []
+    func resetHookReads() { hookReads = [] }
 
     func seed(_ person: Person, handles: [(Identity.Kind, String)] = []) {
         people[person.id] = person
@@ -42,7 +44,8 @@ actor FakeMemoryStore: PeopleStoring, MemoryStoring {
 
     // MemoryStoring
     func hooks(for person: PersonID, now: Date) async throws -> [MemoryHook] {
-        storedHooks.filter { $0.personID == person && ($0.expiresAt.map { $0 > now } ?? true) }
+        hookReads.append(person)
+        return storedHooks.filter { $0.personID == person && ($0.expiresAt.map { $0 > now } ?? true) }
             .sorted { $0.createdAt > $1.createdAt }
     }
     func addHook(_ hook: MemoryHook) async throws { storedHooks.append(hook) }
