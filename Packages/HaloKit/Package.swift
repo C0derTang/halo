@@ -39,7 +39,7 @@ let package = Package(
         // Contacts + Photos + bridge-digest importers.
         .target(name: "HaloImport", dependencies: ["HaloCore", "HaloBridgeKit", "HaloClustering"]),
         // Label ranking: Person + identities + digest -> LabelData.
-        .target(name: "HaloLabels", dependencies: ["HaloCore"]),
+        .target(name: "HaloLabels", dependencies: ["HaloCore", "HaloBridgeKit"]),
         // Live lens pipeline: frames -> detect -> track -> throttled embed -> match (seams only).
         .target(name: "HaloLens", dependencies: ["HaloCore", "HaloTracking", "HaloMatching"]),
         // SwiftUI components (hologram label, cards).
