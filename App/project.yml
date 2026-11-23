@@ -34,7 +34,7 @@ targets:
           fi
     dependencies:
       - package: HaloKit
-        products: [HaloCore, HaloStore, HaloMatching, HaloClustering, HaloTracking, HaloVision, HaloImport, HaloLabels, HaloLens, HaloUI]
+        products: [HaloCore, HaloStore, HaloMatching, HaloClustering, HaloTracking, HaloVision, HaloImport, HaloLabels, HaloLens, HaloUI, HaloAppCore, HaloBridgeKit]
     info:
       path: Halo/Info.plist
       properties:
@@ -45,6 +45,17 @@ targets:
         NSPhotoLibraryUsageDescription: Halo scans your photos on-device to suggest people you know. Faces never leave your device.
         NSContactsUsageDescription: Halo links recognized people to your contacts.
         NSFaceIDUsageDescription: Halo locks your people graph behind Face ID.
+        UTExportedTypeDeclarations:
+          - UTTypeIdentifier: study.paradigm.halo.digest
+            UTTypeDescription: Halo iMessage digest
+            UTTypeConformsTo: [public.data]
+            UTTypeTagSpecification:
+              public.filename-extension: [halodigest]
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: Halo iMessage digest
+            LSHandlerRank: Owner
+            LSItemContentTypes: [study.paradigm.halo.digest]
+        LSSupportsOpeningDocumentsInPlace: false
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: study.paradigm.halo
