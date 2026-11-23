@@ -4,6 +4,11 @@
 # capacity failure, squash-merge when green (no --delete-branch). Prints one line per PR.
 set -uo pipefail
 for p in "$@"; do
+  # Wait (up to 10 min) for a check run to be registered after a fresh push.
+  for _ in $(seq 1 40); do
+    gh pr checks "$p" 2>&1 | grep -q "no checks reported" || break
+    sleep 15
+  done
   for attempt in 1 2; do
     gh pr checks "$p" --watch --interval 30 >/dev/null 2>&1
     if gh pr checks "$p" >/dev/null 2>&1; then
