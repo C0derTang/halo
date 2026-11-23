@@ -33,6 +33,10 @@ import Testing
         let cameraStop = try #require(h.log.index("camera.stop"))
         #expect(cancelled < erase)
         #expect(cameraStop < erase)
+        // The scan's write after noticing the cancel (partial-batch save) lands before the erase,
+        // so the erase wipes it instead of the scan re-inserting it afterwards.
+        let partialWrite = try #require(h.log.index("scan.partialWrite"))
+        #expect(partialWrite < erase)
         // In-memory state is reset: no gallery, no running lens or scan, fresh triage model.
         #expect(h.environment.galleryPersonCount == 0)
         #expect(h.environment.activeGallery?.personCount == 0)
@@ -41,6 +45,7 @@ import Testing
         #expect(h.environment.enrollment !== oldEnrollment)
         #expect(h.environment.resetGeneration == generation + 1)
         #expect(try await h.store.allPeople().isEmpty)
+        #expect(try await h.store.unassignedEmbeddings(space: envSpace).isEmpty)
     }
 
     @Test func killSwitchDoesNotResumeTheScan() async throws {
@@ -105,6 +110,7 @@ import Testing
         let forget = try #require(h.log.index("store.forget"))
         let cancelled = try #require(h.log.index("scan.cancelled"))
         #expect(cancelled < forget)
+        #expect(try #require(h.log.index("scan.partialWrite")) < forget)
         try await waitUntil { h.log.count("scan.list") == 2 }
         #expect(h.environment.scanStatus == .scanning)
     }
@@ -167,6 +173,7 @@ import Testing
         let cancelled = try #require(h.log.index("scan.cancelled"))
         let flush = try #require(h.log.index("store.flush"))
         #expect(cancelled < flush)
+        #expect(try #require(h.log.index("scan.partialWrite")) < flush)
         #expect(h.log.count("camera.stop") >= 1)
         #expect(!h.environment.isLensRunning)
         #expect(h.environment.scanStatus == .paused)
@@ -197,6 +204,64 @@ import Testing
         #expect(h.environment.appLock.isCovered)
         await h.environment.scenePhaseChanged(to: .active).value
         #expect(!h.environment.appLock.isCovered)
+    }
+
+    @Test func forgetDuringModelLoadNeverPublishesThatPerson() async throws {
+        let modelGate = EnvGate()
+        let h = try EnvHarness(embedderGate: modelGate)
+        let alice = try await h.store.seedConfirmed("Synthetic Alice", vector: aliceVector)
+        let bob = try await h.store.seedConfirmed("Synthetic Bob", vector: bobVector)
+        let start = Task { await h.environment.start() }
+
+        // Forget Alice while the model loads, and hold the store deletion so the gallery read made
+        // by the refresher built at startup still sees her.
+        let forgetGate = EnvGate()
+        h.store.forgetGate.withLock { $0 = forgetGate }
+        let forget = Task { try await h.environment.store.forget(alice.id) }
+        try await waitUntil { h.log.count("store.forget") == 1 }
+        modelGate.open()
+        await start.value
+
+        let atStart = try #require(h.environment.activeGallery)
+        #expect(atStart.match(aliceVector, policy: .conservative) == .unknown)
+        #expect(Self.knownID(atStart.match(bobVector, policy: .conservative)) == bob.id)
+
+        forgetGate.open()
+        try await forget.value
+        await h.environment.settleGallery()
+        #expect(h.environment.activeGallery?.match(aliceVector, policy: .conservative) == .unknown)
+        #expect(h.environment.galleryPersonCount == 1)
+    }
+
+    @Test func stopDuringCameraStartWins() async throws {
+        let cameraGate = EnvGate()
+        let h = try EnvHarness(cameraStartGate: cameraGate)
+        await h.environment.start()
+        let start = Task { try await h.environment.startLens() }
+        try await waitUntil { h.log.count("camera.start") == 1 }
+
+        h.environment.stopLens()
+        cameraGate.open()
+        try await start.value
+
+        #expect(!h.environment.isLensRunning)
+        // Stopped by stopLens, and again by startLens once the camera came up late.
+        #expect(h.log.count("camera.stop") == 2)
+        #expect(h.log.events.last == "camera.stop")
+    }
+
+    @Test func everyActiveRetriesTheGalleryRebuild() async throws {
+        let h = try EnvHarness()
+        await h.environment.start()
+        #expect(h.environment.galleryPersonCount == 0)
+        // Written behind the environment's back (stands in for a rebuild whose read failed).
+        try await h.store.seedConfirmed("Synthetic Alice", vector: aliceVector)
+        await h.environment.settleGallery()
+        #expect(h.environment.galleryPersonCount == 0)
+
+        await h.environment.scenePhaseChanged(to: .active).value
+        await h.environment.settleGallery()
+        #expect(h.environment.galleryPersonCount == 1)
     }
 
     // MARK: Missing model
@@ -239,6 +304,24 @@ import Testing
         await h.environment.scenePhaseChanged(to: .active).value
         #expect(h.environment.isStoreAvailable)
         #expect(h.environment.resetGeneration == generation + 1)
+    }
+
+    @Test func concurrentCallersOpenTheStoreOnce() async throws {
+        let log = EnvEventLog()
+        let real = try EnvRecordingStore(log: log)
+        let opens = Mutex(0)
+        let lazy = LazyStore(open: {
+            opens.withLock { $0 += 1 }
+            Thread.sleep(forTimeInterval: 0.02)  // a slow open (file setup + migrations)
+            return real
+        })
+        await withTaskGroup(of: Void.self) { group in
+            for _ in 0..<8 {
+                group.addTask { _ = try? await lazy.allPeople() }
+            }
+        }
+        #expect(opens.withLock { $0 } == 1)
+        #expect(lazy.isOpen)
     }
 
     @Test func unavailableStoreThrowsInsteadOfFallingBack() async throws {

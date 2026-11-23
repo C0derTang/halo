@@ -90,6 +90,12 @@ public final class AppEnvironment {
     @ObservationIgnored private var wantsScan = false
     @ObservationIgnored private var scanTask: Task<Void, Never>?
     @ObservationIgnored private var scanRunID = 0
+    /// People being or already forgotten. Owned here (not only by the refresher) so a refresher
+    /// created while a forget is in flight (e.g. during model load) starts with them excluded.
+    @ObservationIgnored private var excludedPeople: Set<PersonID> = []
+    /// Bumped by every `startLens` / `stopLens`. A start whose camera came up after a later stop
+    /// sees a different token and stops the camera again.
+    @ObservationIgnored private var lensToken = 0
 
     public init(dependencies: AppDependencies) {
         self.dependencies = dependencies
@@ -160,7 +166,8 @@ public final class AppEnvironment {
             detector: dependencies.detector, embedder: embedder, matcher: NullMatcher(),
             policy: dependencies.policy, config: dependencies.lensConfig)
         let refresher = GalleryRefresher(
-            store: lazyStore, space: embedder.space, sink: pipeline, debounce: dependencies.galleryDebounce
+            store: lazyStore, space: embedder.space, sink: pipeline, debounce: dependencies.galleryDebounce,
+            excluded: excludedPeople
         ) { [weak self] matcher in
             await self?.galleryApplied(matcher)
         }
@@ -225,7 +232,11 @@ public final class AppEnvironment {
                 let lock = appLock
                 Task { await lock.unlock() }
             }
-            return enqueueLifecycle { [self] in reconcileScan() }
+            return enqueueLifecycle { [self] in
+                // Retry a rebuild that failed earlier (e.g. a read while the device was locked).
+                await refresher?.requestRefresh()
+                reconcileScan()
+            }
         default:
             return enqueueLifecycle {}
         }
@@ -247,12 +258,20 @@ public final class AppEnvironment {
     /// background.
     public func startLens() async throws {
         guard let camera, phase != .background else { return }
+        lensToken += 1
+        let token = lensToken
         try await camera.start()
-        isLensRunning = phase != .background
-        if !isLensRunning { camera.stop() }
+        // A stop (or another start) while the camera was coming up wins: the camera may have
+        // started after that stop was issued, so stop it again.
+        guard token == lensToken, phase != .background else {
+            camera.stop()
+            return
+        }
+        isLensRunning = true
     }
 
     public func stopLens() {
+        lensToken += 1
         camera?.stop()
         isLensRunning = false
     }
@@ -350,12 +369,19 @@ public final class AppEnvironment {
 extension AppEnvironment: ObservedStoreDelegate {
     func storeWillForget(_ id: PersonID) async {
         destructiveOperations += 1
+        excludedPeople.insert(id)
         await pauseScan()
         await refresher?.exclude(id)
     }
 
     func storeDidForget(_ id: PersonID, succeeded: Bool) async {
-        if !succeeded { await refresher?.include(id) }
+        if succeeded {
+            // The refresher may have been created during the forget (model load).
+            await refresher?.exclude(id)
+        } else {
+            excludedPeople.remove(id)
+            await refresher?.include(id)
+        }
         await refresher?.requestRefresh()
         peopleRevision += 1
         destructiveOperations -= 1
@@ -372,6 +398,7 @@ extension AppEnvironment: ObservedStoreDelegate {
 
     func storeDidEraseEverything(succeeded: Bool) async {
         if succeeded {
+            excludedPeople = []
             await refresher?.reset()
             scanProgress = nil
             scanStatus = recognition == .unavailable ? .unavailable : .idle

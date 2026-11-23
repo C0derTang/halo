@@ -36,6 +36,8 @@ final class EnvRecordingStore: AppStoring {
     let log: EnvEventLog
     /// When set, `forget` throws without deleting anything.
     let failForget = Mutex(false)
+    /// When set, `forget` parks on it before touching the store.
+    let forgetGate = Mutex<EnvGate?>(nil)
 
     init(log: EnvEventLog) throws {
         base = try PeopleStore.inMemory()
@@ -59,6 +61,7 @@ final class EnvRecordingStore: AppStoring {
     }
     func forget(_ id: PersonID) async throws {
         log.record("store.forget")
+        if let gate = forgetGate.withLock({ $0 }) { await gate.wait() }
         if failForget.withLock({ $0 }) { throw EnvStoreFailure() }
         try await base.forget(id)
     }
@@ -135,8 +138,11 @@ struct EnvFakeDetector: FaceDetecting, FrameFaceDetecting {
 }
 
 /// Photo library whose listing parks until the scan is cancelled, so a scan is reliably "running".
+/// After noticing the cancellation it still writes once, a little later (like `PhotoScanJob`'s
+/// best-effort partial-batch save), so tests can check that writes finish before an erase.
 struct EnvBlockingLibrary: PhotoLibrarySource {
     let log: EnvEventLog
+    let store: EnvRecordingStore
 
     func assets(after position: PhotoAsset?, limit: Int) async throws -> [PhotoAsset] {
         log.record("scan.list")
@@ -144,6 +150,14 @@ struct EnvBlockingLibrary: PhotoLibrarySource {
             try await Task.sleep(for: .seconds(3600))
         } catch {
             log.record("scan.cancelled")
+            // Not cancellable: the delay must happen even though this task is cancelled.
+            await Task.detached { try? await Task.sleep(for: .milliseconds(20)) }.value
+            try? await store.addEmbeddings([
+                FaceEmbedding(
+                    space: envSpace, vector: [0, 0, 1, 0], source: .photoLibrary,
+                    sourceRef: "synthetic-asset-partial", quality: 0.9)
+            ])
+            log.record("scan.partialWrite")
             throw CancellationError()
         }
         return []
@@ -152,10 +166,46 @@ struct EnvBlockingLibrary: PhotoLibrarySource {
     func loadImage(for asset: PhotoAsset, maxPixelSize: Int) async throws -> PhotoScanImage? { nil }
 }
 
+/// One-shot gate: `wait()` parks until `open()`.
+final class EnvGate: Sendable {
+    private struct State {
+        var isOpen = false
+        var waiters: [CheckedContinuation<Void, Never>] = []
+    }
+    private let state = Mutex(State())
+
+    func wait() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let parked = state.withLock { s in
+                guard !s.isOpen else { return false }
+                s.waiters.append(continuation)
+                return true
+            }
+            if !parked { continuation.resume() }
+        }
+    }
+
+    func open() {
+        let waiters = state.withLock { s in
+            s.isOpen = true
+            defer { s.waiters.removeAll() }
+            return s.waiters
+        }
+        for waiter in waiters { waiter.resume() }
+    }
+}
+
 final class EnvFakeCamera: AppCamera {
     let log: EnvEventLog
-    init(log: EnvEventLog) { self.log = log }
-    func start() async throws { log.record("camera.start") }
+    let startGate: EnvGate?
+    init(log: EnvEventLog, startGate: EnvGate? = nil) {
+        self.log = log
+        self.startGate = startGate
+    }
+    func start() async throws {
+        log.record("camera.start")
+        await startGate?.wait()
+    }
     func stop() { log.record("camera.stop") }
 }
 
@@ -177,7 +227,8 @@ struct EnvHarness {
 
     init(
         modelMissing: Bool = false, region: String? = "US", contacts: [ContactRecord] = [],
-        openStore: (@Sendable () throws -> any AppStoring)? = nil
+        openStore: (@Sendable () throws -> any AppStoring)? = nil, embedderGate: EnvGate? = nil,
+        cameraStartGate: EnvGate? = nil
     ) throws {
         let log = EnvEventLog()
         let store = try EnvRecordingStore(log: log)
@@ -185,17 +236,18 @@ struct EnvHarness {
         let dependencies = AppDependencies(
             openStore: openStore ?? { store },
             loadEmbedder: {
+                await embedderGate?.wait()
                 if modelMissing { throw HaloVisionError.modelNotFound(URL(fileURLWithPath: "/nonexistent")) }
                 return embedder
             },
             detector: EnvFakeDetector(),
-            photoLibrary: EnvBlockingLibrary(log: log),
+            photoLibrary: EnvBlockingLibrary(log: log, store: store),
             contacts: InMemoryContactsSource(records: contacts),
             thumbnails: EnvNoThumbnails(),
             authenticator: EnvFakeAuthenticator(),
             region: region,
             galleryDebounce: .milliseconds(1),
-            makeCamera: { _ in EnvFakeCamera(log: log) })
+            makeCamera: { _ in EnvFakeCamera(log: log, startGate: cameraStartGate) })
         environment = AppEnvironment(dependencies: dependencies)
         self.store = store
         self.log = log

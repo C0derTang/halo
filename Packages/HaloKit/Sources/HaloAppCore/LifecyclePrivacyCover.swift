@@ -73,8 +73,8 @@ struct LifecyclePrivacyCoverModifier: ViewModifier {
                     .frame(width: 0, height: 0)
                     .accessibilityHidden(true)
                 }
-                .onChange(of: lock.isCovered, initial: true) { _, covered in
-                    controller.setCovered(covered)
+                .onChange(of: lock.isCovered, initial: true) { _, _ in
+                    controller.syncWithLock()
                 }
             #endif
     }
@@ -86,12 +86,14 @@ struct LifecyclePrivacyCoverModifier: ViewModifier {
     final class LifecyclePrivacyWindowController {
         private var window: UIWindow?
         private weak var scene: UIWindowScene?
-        private var observers: [NSObjectProtocol] = []
+        private weak var lock: AppLock?
+        private var observers = NotificationObservers()
 
         func install(in scene: UIWindowScene, lock: AppLock) {
             guard self.scene !== scene else { return }
-            removeObservers()
+            observers = NotificationObservers()
             self.scene = scene
+            self.lock = lock
 
             let window = UIWindow(windowScene: scene)
             window.windowLevel = .alert + 1
@@ -103,13 +105,19 @@ struct LifecyclePrivacyCoverModifier: ViewModifier {
             self.window = window
 
             // Cover synchronously before the system snapshots the app for the switcher.
-            let center = NotificationCenter.default
             for name in [UIScene.willDeactivateNotification, UIScene.didEnterBackgroundNotification] {
-                observers.append(
-                    center.addObserver(forName: name, object: scene, queue: .main) { [weak self] _ in
-                        MainActor.assumeIsolated { self?.setCovered(true) }
-                    })
+                observers.add(name, object: scene) { [weak self] in self?.setCovered(true) }
             }
+            // On activation re-sync with the lock, so a cover shown by the notifications above can
+            // never stay up after `isCovered` went false (the SwiftUI onChange may not fire again).
+            observers.add(UIScene.didActivateNotification, object: scene) { [weak self] in
+                self?.syncWithLock()
+            }
+        }
+
+        func syncWithLock() {
+            guard let lock else { return }
+            setCovered(lock.isCovered)
         }
 
         func setCovered(_ covered: Bool) {
@@ -121,14 +129,25 @@ struct LifecyclePrivacyCoverModifier: ViewModifier {
             }
             window.isHidden = !covered
         }
+    }
 
-        private func removeObservers() {
-            for observer in observers { NotificationCenter.default.removeObserver(observer) }
-            observers.removeAll()
+    /// NotificationCenter registrations removed when the holder goes away. Non-isolated `deinit`
+    /// (no `isolated deinit` needed): it only touches its own tokens.
+    final class NotificationObservers {
+        private var tokens: [NSObjectProtocol] = []
+
+        @MainActor
+        func add(
+            _ name: Notification.Name, object: AnyObject, _ handler: @escaping @MainActor @Sendable () -> Void
+        ) {
+            tokens.append(
+                NotificationCenter.default.addObserver(forName: name, object: object, queue: .main) { _ in
+                    MainActor.assumeIsolated { handler() }
+                })
         }
 
-        isolated deinit {
-            removeObservers()
+        deinit {
+            for token in tokens { NotificationCenter.default.removeObserver(token) }
         }
     }
 

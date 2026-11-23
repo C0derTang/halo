@@ -41,26 +41,28 @@
             options.resizeMode = .fast
             options.isSynchronous = false
             let size = CGSize(width: targetPixelSize, height: targetPixelSize)
-            let once = ThumbnailResumeOnce()
+            let request = ThumbnailRequest()
             let timeout = self.timeout
-            return await withCheckedContinuation {
-                (continuation: CheckedContinuation<SendableImage, Never>) in
-                let request = PHImageManager.default().requestImage(
-                    for: asset, targetSize: size, contentMode: .aspectFill, options: options
-                ) { image, info in
-                    if (info?[PHImageResultIsDegradedKey] as? Bool) == true { return }
-                    if once.claim() {
-                        continuation.resume(returning: SendableImage(image.flatMap(Self.cgImage)))
+            return await withTaskCancellationHandler {
+                await withCheckedContinuation { (continuation: CheckedContinuation<SendableImage, Never>) in
+                    guard request.install(continuation) else { return }  // already cancelled
+                    let id = PHImageManager.default().requestImage(
+                        for: asset, targetSize: size, contentMode: .aspectFill, options: options
+                    ) { image, info in
+                        if (info?[PHImageResultIsDegradedKey] as? Bool) == true { return }
+                        request.finish(SendableImage(image.flatMap(Self.cgImage)))
                     }
-                }
-                Task {
-                    try? await Task.sleep(for: timeout)
-                    if once.claim() {
-                        PHImageManager.default().cancelImageRequest(request)
-                        continuation.resume(returning: SendableImage(nil))
-                    }
-                }
-            }.image
+                    request.setRequestID(id)
+                    request.setTimer(
+                        Task {
+                            try? await Task.sleep(for: timeout)
+                            guard !Task.isCancelled else { return }
+                            request.cancel()  // PhotoKit never called back
+                        })
+                }.image
+            } onCancel: {
+                request.cancel()
+            }
         }
 
         #if canImport(UIKit)
@@ -78,14 +80,66 @@
         init(_ image: CGImage?) { self.image = image }
     }
 
-    /// Guards the continuation against a second callback or the timeout firing after a result.
-    private final class ThumbnailResumeOnce: Sendable {
-        private let done = Mutex(false)
-        func claim() -> Bool {
-            done.withLock { done in
-                defer { done = true }
-                return !done
+    /// One PhotoKit thumbnail request: resumes its continuation exactly once (result, timeout or
+    /// task cancellation), cancels the PhotoKit request when it did not deliver, and cancels the
+    /// timeout task once a result arrived.
+    private final class ThumbnailRequest: Sendable {
+        private struct State {
+            var continuation: CheckedContinuation<SendableImage, Never>?
+            var requestID: PHImageRequestID?
+            var timer: Task<Void, Never>?
+            var finished = false
+        }
+        private let state = Mutex(State())
+
+        /// Returns false (and resumes with nil) when the request was cancelled before it started.
+        func install(_ continuation: CheckedContinuation<SendableImage, Never>) -> Bool {
+            let finished = state.withLock { s in
+                if !s.finished { s.continuation = continuation }
+                return s.finished
             }
+            if finished { continuation.resume(returning: SendableImage(nil)) }
+            return !finished
+        }
+
+        func setRequestID(_ id: PHImageRequestID) {
+            let finishedBeforehand = state.withLock { s in
+                s.requestID = id
+                return s.finished
+            }
+            // Cancelled between `install` and here: the request is no longer wanted.
+            if finishedBeforehand { PHImageManager.default().cancelImageRequest(id) }
+        }
+
+        func setTimer(_ timer: Task<Void, Never>) {
+            let finishedBeforehand = state.withLock { s in
+                s.timer = timer
+                return s.finished
+            }
+            if finishedBeforehand { timer.cancel() }
+        }
+
+        /// Delivers the result (first call wins).
+        func finish(_ image: SendableImage) {
+            let taken = state.withLock {
+                s -> (CheckedContinuation<SendableImage, Never>?, Task<Void, Never>?) in
+                guard !s.finished else { return (nil, nil) }
+                s.finished = true
+                defer {
+                    s.continuation = nil
+                    s.timer = nil
+                }
+                return (s.continuation, s.timer)
+            }
+            taken.1?.cancel()
+            taken.0?.resume(returning: image)
+        }
+
+        /// Timeout or task cancellation: resume with nil and cancel the PhotoKit request.
+        func cancel() {
+            let id = state.withLock { s in s.finished ? nil : s.requestID }
+            finish(SendableImage(nil))
+            if let id { PHImageManager.default().cancelImageRequest(id) }
         }
     }
 #endif

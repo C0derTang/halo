@@ -19,6 +19,10 @@ public enum AppStoreError: Error, Equatable, Sendable {
 final class LazyStore: AppStoring {
     private let open: @Sendable () throws -> any AppStoring
     private let opened = Mutex<(any AppStoring)?>(nil)
+    /// Serializes opening: only one caller at a time runs `open()` (file setup + migrations), so two
+    /// callers can never create two stores on the same file concurrently. Separate from `opened` so
+    /// reads of an already-open store never wait behind an open in progress.
+    private let opening = Mutex(())
 
     init(open: @escaping @Sendable () throws -> any AppStoring) {
         self.open = open
@@ -30,9 +34,10 @@ final class LazyStore: AppStoring {
     @discardableResult
     func openIfNeeded() -> Bool {
         if isOpen { return true }
-        guard let store = try? open() else { return false }
-        return opened.withLock { current in
-            if current == nil { current = store }
+        return opening.withLock { _ in
+            if isOpen { return true }  // another caller opened it while we waited
+            guard let store = try? open() else { return false }
+            opened.withLock { $0 = store }
             return true
         }
     }

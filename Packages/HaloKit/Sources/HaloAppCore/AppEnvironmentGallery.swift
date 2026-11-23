@@ -28,7 +28,9 @@ actor GalleryRefresher {
     private let onApply: @Sendable (GalleryMatcher) async -> Void
 
     private var gallery: [FaceEmbedding] = []
-    private var excluded: Set<PersonID> = []
+    /// People being (or already) forgotten. Seeded from the environment at creation, so a refresher
+    /// built while a forget is in flight never publishes that person.
+    private var excluded: Set<PersonID>
     /// Bumped by every request; a store read only applies if no newer request arrived meanwhile.
     private var generation = 0
     private var pending: Task<Void, Never>?
@@ -36,9 +38,10 @@ actor GalleryRefresher {
 
     init(
         store: any PeopleStoring, space: EmbeddingSpace, sink: any GalleryMatcherSink, debounce: Duration,
-        onApply: @escaping @Sendable (GalleryMatcher) async -> Void
+        excluded: Set<PersonID> = [], onApply: @escaping @Sendable (GalleryMatcher) async -> Void
     ) {
         self.store = store
+        self.excluded = excluded
         self.space = space
         self.sink = sink
         self.debounce = debounce
