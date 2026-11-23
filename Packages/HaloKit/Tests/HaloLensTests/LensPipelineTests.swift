@@ -235,6 +235,36 @@ import Testing
     #expect(jumped[0][0].personID == nil)
 }
 
+@Test func partialStreakDiscardedWhenTrackReappearsAfterMiss() async {
+    // Two votes for person 1 on face A, a missed frame, then a loose re-match to face B that
+    // also reads as person 1 once: that single vote must not complete A's streak.
+    let h = Harness(config: everyFrame)
+    h.embedder.setCode(1, x: 0.3)
+    h.embedder.setCode(1, x: 0.45)
+    let before = await h.run(0..<2, faces: [face(x: 0.3)])
+    #expect(before.allSatisfy { $0[0].personID == nil })
+    await h.run(2..<3, faces: [])
+    let jumped = await h.run(3..<4, faces: [face(x: 0.45)])
+    #expect(jumped[0].count == 1)
+    #expect(jumped[0][0].trackID == before[0][0].trackID, "fixture expects the tracker to re-associate")
+    #expect(jumped[0][0].personID == nil)
+    // A full fresh streak on the new face is still needed.
+    let more = await h.run(4..<6, faces: [face(x: 0.45)])
+    #expect(more[0][0].personID == nil)
+    #expect(more[1][0].personID == person(1))
+}
+
+@Test func labelRequiresFreshVotesAfterMissEvenOnIoUMatch() async {
+    let h = Harness(config: everyFrame)
+    h.embedder.setCode(1, x: 0.3)
+    await h.run(0..<3, faces: [face(x: 0.3)])
+    await h.run(3..<4, faces: [])
+    let back = await h.run(4..<7, faces: [face(x: 0.3)])
+    #expect(back[0][0].personID == nil)
+    #expect(back[1][0].personID == nil)
+    #expect(back[2][0].personID == person(1))
+}
+
 @Test func twoFacesKeepSeparateIdentities() async {
     let h = Harness(config: everyFrame)
     h.embedder.setCode(1, x: 0.1)
@@ -303,20 +333,22 @@ import Testing
 @Test func framesDroppedWhileBusyNoBacklog() async {
     let h = Harness(config: everyFrame)
     h.detector.faces = [face(x: 0.3)]
-    h.detector.setDelay(.milliseconds(200))
+    h.detector.hold()  // the first frame stays in flight until released
 
     #expect(h.pipeline.submit(h.frames.frame(0)))
     var accepted = 0
     for i in 1...100 where h.pipeline.submit(h.frames.frame(i)) { accepted += 1 }
     #expect(accepted == 0, "frames arriving while busy must be dropped, not queued")
 
-    // Concurrent `process` calls are dropped too and return immediately.
+    // Concurrent `process` calls are dropped too and return without waiting.
     await withTaskGroup(of: Void.self) { group in
         for i in 101...120 {
             group.addTask { _ = await h.pipeline.process(h.frames.frame(i)) }
         }
     }
+    #expect(await h.pipeline.metrics.processedFrames == 0)
 
+    h.detector.release()
     var iterator = h.pipeline.tracks.makeAsyncIterator()
     let first = await iterator.next()
     #expect(first?.count == 1)
@@ -326,7 +358,6 @@ import Testing
     #expect(metrics.processedFrames == 1)
 
     // Once idle, the next frame is processed normally.
-    h.detector.setDelay(.zero)
     let next = await h.pipeline.process(h.frames.frame(121))
     #expect(next.count == 1)
     #expect(h.detector.calls == 2)
@@ -334,14 +365,20 @@ import Testing
 
 @Test func droppedProcessCallReturnsPreviousResult() async {
     let h = Harness(config: everyFrame)
+    var iterator = h.pipeline.tracks.makeAsyncIterator()
     await h.run(0..<1, faces: [face(x: 0.3)])
-    let previous = await h.pipeline.currentTracks
-    h.detector.setDelay(.milliseconds(200))
-    async let slow = h.pipeline.process(h.frames.frame(1))
-    try? await Task.sleep(for: .milliseconds(50))
+    let previous = await iterator.next()
+    #expect(previous?.count == 1)
+
+    h.detector.hold()
+    h.detector.faces = [face(x: 0.3), face(x: 0.7)]
+    #expect(h.pipeline.submit(h.frames.frame(1)))
     let dropped = await h.pipeline.process(h.frames.frame(2))
     #expect(dropped == previous)
-    _ = await slow
+
+    h.detector.release()
+    let next = await iterator.next()
+    #expect(next?.count == 2)
     #expect(h.detector.calls == 2)
 }
 

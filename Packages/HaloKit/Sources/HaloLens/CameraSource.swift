@@ -20,8 +20,12 @@
     ///   back camera (no per-frame rotation cost).
     /// - Frames never leave the device; the handler typically calls `LensPipeline.submit(_:)`.
     ///
-    /// `@unchecked Sendable`: all session configuration and start/stop run on `sessionQueue`; the
-    /// delegate callback runs on `videoQueue` and touches only immutable state.
+    /// - Restarts itself after an interruption ends or a runtime error (e.g. media services reset),
+    ///   unless `stop()` was called.
+    ///
+    /// `@unchecked Sendable`: all session configuration, start/stop and the mutable flags are
+    /// confined to `sessionQueue`; the delegate callback runs on `videoQueue` and touches only
+    /// immutable state.
     public final class CameraSource: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate,
         @unchecked Sendable
     {
@@ -37,10 +41,26 @@
         private let output = AVCaptureVideoDataOutput()
         private let onFrame: FrameHandler
         private var configured = false
+        /// True between `start()` and `stop()`; gates automatic restarts. `sessionQueue` only.
+        private var wantsRunning = false
+        private var observers: [NSObjectProtocol] = []
 
         public init(onFrame: @escaping FrameHandler) {
             self.onFrame = onFrame
             super.init()
+            let center = NotificationCenter.default
+            for name in [
+                AVCaptureSession.interruptionEndedNotification, AVCaptureSession.runtimeErrorNotification,
+            ] {
+                observers.append(
+                    center.addObserver(forName: name, object: session, queue: nil) { [weak self] _ in
+                        self?.restartIfWanted()
+                    })
+            }
+        }
+
+        deinit {
+            for observer in observers { NotificationCenter.default.removeObserver(observer) }
         }
 
         public static var authorizationStatus: AVAuthorizationStatus {
@@ -63,6 +83,7 @@
                 sessionQueue.async {
                     do {
                         try self.configureIfNeeded()
+                        self.wantsRunning = true
                         if !self.session.isRunning { self.session.startRunning() }
                         cont.resume()
                     } catch {
@@ -74,7 +95,16 @@
 
         public func stop() {
             sessionQueue.async {
+                self.wantsRunning = false
                 if self.session.isRunning { self.session.stopRunning() }
+            }
+        }
+
+        /// Interruption ended / runtime error: resume if the owner still wants frames.
+        private func restartIfWanted() {
+            sessionQueue.async {
+                guard self.wantsRunning, self.configured, !self.session.isRunning else { return }
+                self.session.startRunning()
             }
         }
 
@@ -95,8 +125,17 @@
             output.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
             output.alwaysDiscardsLateVideoFrames = true
             output.setSampleBufferDelegate(self, queue: videoQueue)
-            guard session.canAddOutput(output) else { throw CameraSourceError.cannotAddOutput }
+            guard session.canAddOutput(output) else {
+                // Leave the session empty so a later start() can retry from scratch.
+                session.removeInput(input)
+                throw CameraSourceError.cannotAddOutput
+            }
             session.addOutput(output)
+            // Keep buffers in sensor orientation (some devices default to 180), so that
+            // `portraitOrientation` (.right) stays correct.
+            if let connection = output.connection(with: .video), connection.isVideoRotationAngleSupported(0) {
+                connection.videoRotationAngle = 0
+            }
             configured = true
         }
 

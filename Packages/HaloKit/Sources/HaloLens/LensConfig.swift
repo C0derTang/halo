@@ -9,8 +9,22 @@ public struct LensConfig: Sendable, Equatable {
     /// unlabeled tracks for the per-frame embed budget, so a label is always re-checked.
     public var reverifyInterval: TimeInterval
     /// A labeled track with no successful embedding for this long loses its label (evidence
-    /// stopped, e.g. face turned away or too small). Must exceed `reverifyInterval`.
-    public var staleLabelTimeout: TimeInterval
+    /// stopped, e.g. face turned away or too small).
+    ///
+    /// Always strictly greater than `reverifyInterval`, otherwise a label that is being re-verified
+    /// on schedule would expire between checks: a requested value `<= reverifyInterval` reads back
+    /// as `reverifyInterval + max(reverifyInterval, minimumStaleMargin)`.
+    public var staleLabelTimeout: TimeInterval {
+        get {
+            requestedStaleLabelTimeout > reverifyInterval
+                ? requestedStaleLabelTimeout
+                : reverifyInterval + max(reverifyInterval, Self.minimumStaleMargin)
+        }
+        set { requestedStaleLabelTimeout = newValue }
+    }
+    private var requestedStaleLabelTimeout: TimeInterval
+    /// Smallest gap kept between `reverifyInterval` and `staleLabelTimeout` when clamping.
+    public static let minimumStaleMargin: TimeInterval = 0.1
     /// At most this many embeddings per processed frame.
     public var maxEmbedsPerFrame: Int
     /// Faces below this capture quality (0...1) are never embedded.
@@ -27,7 +41,7 @@ public struct LensConfig: Sendable, Equatable {
     ) {
         self.embedInterval = embedInterval
         self.reverifyInterval = reverifyInterval
-        self.staleLabelTimeout = staleLabelTimeout
+        self.requestedStaleLabelTimeout = staleLabelTimeout
         self.maxEmbedsPerFrame = maxEmbedsPerFrame
         self.minFaceQuality = minFaceQuality
         self.minFaceSide = minFaceSide

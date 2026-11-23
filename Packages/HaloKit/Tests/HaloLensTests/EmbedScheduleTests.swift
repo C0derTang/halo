@@ -72,3 +72,17 @@ private func candidate(_ id: UInt64, labeled: Bool = false, eligible: Bool = tru
     m.recordLatency(.detect, .milliseconds(20))
     #expect(abs((m.latencyMilliseconds[.detect] ?? 0) - 11) < 1e-6)
 }
+
+@Test func staleLabelTimeoutAlwaysExceedsReverifyInterval() {
+    #expect(LensConfig().staleLabelTimeout == 2)
+    #expect(LensConfig(reverifyInterval: 1, staleLabelTimeout: 1.5).staleLabelTimeout == 1.5)
+    #expect(LensConfig(reverifyInterval: 1, staleLabelTimeout: 1).staleLabelTimeout == 2)
+    #expect(LensConfig(reverifyInterval: 1, staleLabelTimeout: 0.2).staleLabelTimeout == 2)
+    #expect(LensConfig(reverifyInterval: 0, staleLabelTimeout: 0).staleLabelTimeout == 0.1)
+    // Enforced after mutation too.
+    var config = LensConfig(reverifyInterval: 1, staleLabelTimeout: 3)
+    config.reverifyInterval = 4
+    #expect(config.staleLabelTimeout > config.reverifyInterval)
+    config.staleLabelTimeout = 0.5
+    #expect(config.staleLabelTimeout == 8)
+}

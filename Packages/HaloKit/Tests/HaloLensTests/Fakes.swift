@@ -63,11 +63,13 @@ struct FrameFactory: @unchecked Sendable {
 
 struct FakeError: Error {}
 
-/// Detector scripted by the test before each frame.
+/// Detector scripted by the test before each frame. `hold()` parks every call until the test
+/// calls `release()` (a deterministic "slow detector", no sleeps).
 final class FakeDetector: FrameFaceDetecting {
     private struct State {
         var faces: [FaceObservation] = []
-        var delay: Duration = .zero
+        var held = false
+        var waiters: [CheckedContinuation<Void, Never>] = []
         var fails = false
         var calls = 0
         var calledOnMainThread = false
@@ -78,19 +80,34 @@ final class FakeDetector: FrameFaceDetecting {
         get { state.withLock { $0.faces } }
         set { state.withLock { $0.faces = newValue } }
     }
-    func setDelay(_ delay: Duration) { state.withLock { $0.delay = delay } }
+    func hold() { state.withLock { $0.held = true } }
+    func release() {
+        let waiters = state.withLock { s in
+            s.held = false
+            defer { s.waiters.removeAll() }
+            return s.waiters
+        }
+        for waiter in waiters { waiter.resume() }
+    }
     func setFails(_ fails: Bool) { state.withLock { $0.fails = fails } }
     var calls: Int { state.withLock { $0.calls } }
     var calledOnMainThread: Bool { state.withLock { $0.calledOnMainThread } }
 
     func detectFaces(in frame: VideoFrame) async throws -> [FaceObservation] {
         let onMain = pthread_main_np() != 0
-        let (faces, delay, fails) = state.withLock { s in
+        let (faces, fails) = state.withLock { s in
             s.calls += 1
             s.calledOnMainThread = s.calledOnMainThread || onMain
-            return (s.faces, s.delay, s.fails)
+            return (s.faces, s.fails)
         }
-        if delay > .zero { try? await Task.sleep(for: delay) }
+        await withCheckedContinuation { (waiter: CheckedContinuation<Void, Never>) in
+            let parked = state.withLock { s in
+                guard s.held else { return false }
+                s.waiters.append(waiter)
+                return true
+            }
+            if !parked { waiter.resume() }
+        }
         if fails { throw FakeError() }
         return faces.map {
             var f = $0
