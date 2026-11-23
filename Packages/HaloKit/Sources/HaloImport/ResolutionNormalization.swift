@@ -11,7 +11,8 @@ public struct HandleNormalization: Sendable {
 
     public init(normalizer: HandleNormalizer) { self.normalizer = normalizer }
 
-    /// Region defaults to the device locale (falls back to "ZZ", the unknown region: national-format numbers stay unnormalized rather than guessed as US).
+    /// Region defaults to the device locale. With no region it falls back to "ZZ" (unknown):
+    /// national-format numbers then stay unnormalized instead of being guessed as US.
     public init(region: String? = Locale.current.region?.identifier) {
         self.init(normalizer: HandleNormalizer(region: region ?? Self.unknownRegion))
     }
