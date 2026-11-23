@@ -1,125 +1,100 @@
-# Halo — product plan (draft v0, awaiting feedback)
+# Halo — product plan (v1)
 
 A live camera lens that recognizes people you already know and floats a holographic label over their
 head: who they are, how you know them, and the one or two things worth remembering right now.
 
-Design stance: a **personal memory aid**, not a surveillance tool. Everything biometric is on-device,
-only people you enrolled and confirmed are ever recognized, and unknown faces stay anonymous.
+**Decisions (2026-11-23):** personal prototype (TestFlight / own device), native Swift (iOS 26),
+public GitHub repo, sources = Contacts + Apple Photos + iMessage (Mac bridge), on-device AI only.
+
+Design stance: a **personal memory aid**, not a surveillance tool. Everything biometric is
+on-device, only people you enrolled and confirmed are ever recognized, unknown faces stay anonymous.
 See the invariants in `AGENTS.md`.
 
 ## Feature set
 
-### Core (MVP)
+### MVP
+1. **Live Lens** — camera; real-time face detection + tracking; recognized people get a holographic
+   label above the head (smoothed, scaled by face size, fades on track loss). Unknown faces get a
+   faint neutral ring only. Tap a label → full context card.
+2. **People Graph (local)** — one `Person` per human; identities from contact card, phone/email,
+   iMessage handles, photo clusters.
+3. **Enrollment ("Who is this?")** — on-device scan of Apple Photos: detect, embed, cluster; user
+   names clusters (linked to a contact) in a triage UI. Contact photos seed enrollment. Nothing is
+   recognizable until confirmed.
+4. **Context labels** — name + relationship + 1–2 ranked chips: last interaction ("texted 3d ago"),
+   upcoming (birthday in 5 days), open loop ("they're waiting on your reply"), memory hook.
+5. **iMessage bridge** — macOS CLI reads `chat.db` metadata → `InteractionDigest` → encrypted file
+   moved to the phone (AirDrop/Files) and imported with a QR-paired key.
+6. **Privacy core** — Face ID lock, Data-Protection-encrypted store, per-person forget, kill switch,
+   local recognition log.
 
-1. **Live Lens** — full-screen camera; real-time face detection and tracking; recognized people get a
-   holographic label anchored above the head (smoothed, depth-scaled, fades on track loss). Unknown
-   faces get a faint neutral ring only. Tap a label to expand a full context card.
-2. **People Graph (local)** — one `Person` per human, merging identities across sources: contact
-   card, face clusters, IG/X handles, iMessage handles, Google Photos picks. Identity resolution by
-   phone/email/handle/name with user-confirmed merges.
-3. **Enrollment ("Who is this?")** — on-device scan of the Apple Photos library: detect faces,
-   embed, cluster; user names clusters (linked to a contact) in a swipeable triage UI. Contact photos
-   seed enrollment too. Nothing is recognizable until confirmed.
-4. **Context labels** — label shows name + relationship line + 1–2 chips chosen by a ranker:
-   last interaction ("texted 3d ago"), upcoming (birthday in 5 days), memory hook ("met at Sam's
-   wedding '24"), open loop ("you owe them a reply"), shared recent photo. Card shows the rest.
-5. **Connectors / importers**
-   - Apple Contacts (names, photos, birthdays, notes, relations)
-   - Apple Photos (PhotoKit, full library, on-device)
-   - Google Photos (Picker API — user picks albums/photos per session)
-   - Instagram (import "Download your information" export: followers/following, DMs metadata, media)
-   - X (OAuth: following list + DMs, pay-per-use; or archive import)
-   - iMessage (Mac companion reads `chat.db` → per-person interaction stats + recent-thread digest →
-     encrypted sync to phone)
-   - LinkedIn (export import — later)
-6. **Privacy core** — Face ID app lock, encrypted store, per-person "forget", global kill switch,
-   per-source disconnect + purge, local audit log of recognitions, export-my-data.
+### Next (wave 4)
+7. On-device memory hooks — Foundation Models summarizes message text (bridge v2 decodes
+   `attributedBody`) into 2–3 hooks per person.
+8. Moments — capture a labeled frame + quick note that feeds memory hooks.
+9. Whisper mode — AirPods speak name + one hook; haptic tap.
+10. ARKit 3D anchoring for the hologram (depth-stable placement, parallax).
 
-### Next
-
-7. **Moments** — capture a frame with labels; quick voice/text note ("talked about her new job")
-   that feeds back into that person's memory hooks.
-8. **On-device summaries** — Apple Foundation Models (iOS 26) turns message/social history into
-   2–3 short memory hooks per person. Never off-device by default.
-9. **Whisper mode** — no screen needed: AirPods speak the name + one hook when a known face is held
-   in frame; haptic tap for "you know this person".
-10. **Holographic polish** — Skia shader label (scanlines, chromatic fringe, glow, parallax from
-    device motion), per-relationship color coding, entry/exit animations.
-
-### Later / explicitly out of scope
-
-- Smart-glasses mode (Ray-Ban Meta / visionOS) — later.
-- Identifying strangers, web/social lookup of unknown faces, cloud face matching — **never**.
+### Later / never
+- Later: Google Photos (Picker), Instagram/X archive import, LinkedIn export, glasses.
+- **Never:** identifying strangers, web/social lookup of unknown faces, cloud face matching.
 
 ## Architecture
 
 ```
-Camera (VisionCamera v5 frame output, worklet)
-  └─ face detector (ML Kit/Nitro) ─ boxes + landmarks
-       └─ aligner + embedder (CoreML/TFLite, native) ─ 128/512-d vector   [throttled per track]
-            └─ tracker (IoU + One Euro smoothing, track IDs)
-                 └─ matcher (open-set cosine, top-2 margin, per-track voting)
-                      └─ label builder (graph + ranker → LabelData)
-                           └─ Skia hologram overlay
-People Graph store (expo-sqlite + SQLCipher)  ◄── connectors/importers (contacts, photos, picker,
-                                                   IG/X archives, X OAuth, Mac iMessage bridge)
-server/ (Vercel) — OAuth token exchange only (no user data)
-mac/    — iMessage bridge CLI (reads chat.db, emits encrypted digest)
+AVCaptureSession (HaloLens, off main actor)
+  └─ FaceDetecting (HaloVision: Vision rects + landmarks + capture quality)
+       └─ FaceTracking (HaloTracking: IoU assignment + One Euro smoothing)
+            └─ FaceEmbedder (HaloVision: align + CoreML), throttled per track
+                 └─ FaceMatching (HaloMatching: open-set, top-2 margin, per-track votes)
+                      └─ LabelRanking (HaloLabels) ─► HologramLabel (HaloUI)
+PeopleStoring (HaloStore: GRDB + Data Protection) ◄── HaloImport (Contacts, PhotoScan, digest import)
+                                                  ◄── HaloClustering (enrollment suggestions)
+halo-bridge (macOS CLI, HaloBridgeKit) ──encrypted digest──► app
 ```
 
-## Waves (draft — becomes GitHub issues via `/plan-wave`)
+## Waves
 
-**Wave 0 — master scaffold (no agents):** Expo SDK 58 app, TS strict, eslint/tsc/vitest, CI,
-`src/lib/types.ts` contract, `src/lib/seams.ts`, `docs/MODELS.md`, EAS config.
+**Wave 0 — master scaffold (done):** HaloKit package with all targets, `Contract.swift`,
+`Seams.swift`, XcodeGen app shell, `scripts/check.sh`, CI, agent playbooks.
 
-**Wave 1 — independent foundations (parallel)**
-| # | Issue | Tier |
-|---|-------|------|
-| 1 | People Graph store: schema, encrypted open, CRUD, forget-person cascade | opus |
-| 2 | Matcher: open-set cosine match, thresholds, top-2 margin, per-track voting (pure TS) | opus |
-| 3 | Tracker + smoothing: IoU track assignment, One Euro filter, track lifecycle (pure TS) | opus |
-| 4 | Hologram label component (Skia), driven by props; storybook-style demo screen | sonnet |
-| 5 | Contacts connector → Person/Identity records | sonnet |
-| 6 | Instagram export parser (synthetic fixtures) | sonnet |
-| 7 | X archive parser (synthetic fixtures) | sonnet |
-| 8 | Mac iMessage bridge CLI: chat.db reader → per-handle interaction digest JSON | sonnet |
-| 9 | Embedding model selection + license provenance + native embedder module (spike → module) | opus |
+**Wave 1 — independent modules (parallel, one target each)**
+| Issue | Target | Tier |
+|-------|--------|------|
+| People graph store: schema, migrations, `PeopleStoring`, forget cascade, Data Protection | HaloStore | opus |
+| Open-set matcher + per-track vote accumulator | HaloMatching | opus |
+| Face detection + alignment + CoreML embedder, model fetch script, MODELS.md | HaloVision | opus |
+| IoU tracker + One Euro smoothing (`FaceTracking`) | HaloTracking | sonnet |
+| Embedding clustering for enrollment suggestions | HaloClustering | sonnet |
+| Hologram label + context card SwiftUI components (no `.metal`) | HaloUI | sonnet |
+| iMessage bridge: chat.db reader → `InteractionDigest` CLI | HaloBridgeKit + halo-bridge | sonnet |
+| Contacts importer + handle normalization/resolution | HaloImport | sonnet |
 
 **Wave 2 — pipelines and flows**
-| # | Issue | Tier |
-|---|-------|------|
-| 10 | Camera frame pipeline: VisionCamera v5 + detector + embedder throttling → FaceObservation stream | opus |
-| 11 | Photos library scan + clustering job (background, resumable) | opus |
-| 12 | Enrollment triage UI ("Who is this?") | sonnet |
-| 13 | Identity resolution + merge suggestions across sources | opus |
-| 14 | Google Photos Picker connector (OAuth PKCE + session polling) | sonnet |
-| 15 | X OAuth connector (following + DM metadata) + server token proxy | sonnet |
-| 16 | Label ranker: Person + interactions → LabelData chips | sonnet |
-| 17 | Privacy shell: Face ID lock, kill switch, per-source purge, audit log | sonnet |
+| Issue | Where | Tier |
+|-------|-------|------|
+| Live lens pipeline: capture → detect → track → throttled embed → match | HaloLens | opus |
+| Photo library scan job (resumable) → embeddings → clusters | HaloImport/PhotoScan | opus |
+| Encrypted digest transport: bridge export + QR pairing + app import | HaloBridgeKit + HaloImport | opus |
+| Label ranker | HaloLabels | sonnet |
+| Enrollment triage UI ("Who is this?") | App/Halo/People | sonnet |
+| Privacy shell: Face ID lock, kill switch, forget UI, recognition log | App/Halo/Settings | sonnet |
 
 **Wave 3 — integration**
-| # | Issue | Tier |
-|---|-------|------|
-| 18 | Live Lens screen: pipeline + tracker + matcher + ranker + hologram | opus |
-| 19 | iMessage bridge → phone encrypted sync (pairing, key exchange) | opus |
-| 20 | Onboarding + consent flow + source connection hub | sonnet |
+| Issue | Where | Tier |
+|-------|-------|------|
+| Live Lens screen: pipeline + ranker + hologram overlay + tap-to-card | App/Halo/Lens | opus |
+| App composition root: real implementations wired into seams, RootView | App/Halo | opus |
+| Onboarding + permissions + consent | App/Halo/Onboarding | sonnet |
+| People list + person detail | App/Halo/People | sonnet |
 
-**Wave 4 — polish and ship**
-| # | Issue | Tier |
-|---|-------|------|
-| 21 | Moments capture + notes | sonnet |
-| 22 | On-device summaries (Foundation Models) → memory hooks | sonnet |
-| 23 | Whisper mode (AirPods speech + haptics) | sonnet |
-| 24 | Maestro e2e flows + perf pass (30 fps budget) + EAS TestFlight | sonnet |
+**Wave 4 — next features** (items 7–10 above) + perf pass + TestFlight.
 
 ## Known constraints (verified 2026-11)
-
-- No Xcode on the dev machine → iOS builds via EAS cloud, or install Xcode for local dev builds.
-- Google Photos: no whole-library access; Picker only.
-- Instagram personal accounts: no API; export import only.
-- X: API is pay-per-use (~$0.01/resource read).
-- iMessage: Mac-only via `chat.db`; `imessage-exporter` is GPL-3.0 (run as separate tool or write our
-  own typedstream parser).
-- Face embedding weights: InsightFace pretrained = non-commercial; need verified-license weights.
-- Legal: BIPA has no household exemption; on-device-only + consent UX is the posture. Counsel before
-  any public launch.
+- No Xcode on the dev machine yet → local checks build only; CI (macos-26) runs tests + iOS build.
+  Install Xcode to run on device.
+- Command Line Tools can't compile `.metal` shaders or Swift Testing macros → hologram v1 is pure
+  SwiftUI (Canvas/TimelineView/blend modes).
+- `chat.db`: text often only in `attributedBody` (typedstream) → v1 uses metadata only.
+  `imessage-exporter` is GPL-3.0 → don't link it.
+- Embedding weights: research-licensed acceptable for personal use, never committed (public repo).

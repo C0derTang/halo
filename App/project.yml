@@ -1,0 +1,39 @@
+# Master-owned. Generate the Xcode project with: xcodegen generate --spec App/project.yml
+# Halo.xcodeproj is generated and gitignored — never hand-edit it.
+name: Halo
+options:
+  bundleIdPrefix: study.paradigm.halo
+  deploymentTarget:
+    iOS: "26.0"
+  createIntermediateGroups: true
+packages:
+  HaloKit:
+    path: ../Packages/HaloKit
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    DEVELOPMENT_TEAM: ""
+    CODE_SIGN_STYLE: Automatic
+targets:
+  Halo:
+    type: application
+    platform: iOS
+    sources: [Halo]
+    dependencies:
+      - package: HaloKit
+        products: [HaloCore, HaloStore, HaloMatching, HaloClustering, HaloTracking, HaloVision, HaloImport, HaloLabels, HaloLens, HaloUI]
+    info:
+      path: Halo/Info.plist
+      properties:
+        CFBundleDisplayName: Halo
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        NSCameraUsageDescription: Halo uses the camera to recognize people you have enrolled. Video never leaves your device.
+        NSPhotoLibraryUsageDescription: Halo scans your photos on-device to suggest people you know. Faces never leave your device.
+        NSContactsUsageDescription: Halo links recognized people to your contacts.
+        NSFaceIDUsageDescription: Halo locks your people graph behind Face ID.
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: study.paradigm.halo
+        GENERATE_INFOPLIST_FILE: NO

@@ -13,14 +13,17 @@ Input: PR number `<n>`. Read-only. Do not check out, edit, comment, or approve o
    `git show origin/<branch>:<path>` (fetch first) — not just the hunks.
 3. Verify against the code, not the PR description:
    - **Invariants**: known-people-only (no lookup of unknown faces); biometrics never leave device
-     (grep the diff for `fetch`, network clients, logging/analytics of crops/embeddings);
+     (grep the diff for `URLSession`, network clients, logging of crops/embeddings);
      confirm-before-recognize; open-set match rejects below threshold and ambiguous top-2;
-     tokens only in secure store, no client secrets in the bundle; frame processor work stays in
-     worklets/native.
-   - **Contract**: no unauthorized edits to `src/lib/types.ts`, `src/lib/seams.ts`,
-     `src/lib/store/schema.ts`.
-   - **Test discovery**: new tests are under `tests/**/*.test.ts` and actually exercise the invariant.
-   - **APIs**: when a library API is in question, read the installed version under `node_modules/`.
+     secrets only in the Keychain; per-frame work never on the main actor.
+   - **Contract**: no unauthorized edits to `Contract.swift`, `Seams.swift`, `Package.swift`,
+     `App/project.yml`, store migrations; the PR stays inside its own target/folder.
+   - **Test discovery**: new tests are Swift Testing files under
+     `Packages/HaloKit/Tests/<Target>Tests/`, show up in the CI log, and exercise the invariant.
+   - **APIs**: when an API is in question, read GRDB under `Packages/HaloKit/.build/checkouts/` or the
+     SDK `.swiftinterface`; iOS 26 APIs differ from older training data.
+   - **Swift 6 concurrency**: no `@unchecked Sendable` / `nonisolated(unsafe)` without justification;
+     camera/vision work off the main actor.
    - Seams have safe defaults; the PR merges cleanly without sibling issues.
 4. Skip style nits. File non-blocking items separately as "follow-up".
 

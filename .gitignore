@@ -9,3 +9,11 @@ dist/
 .claude/settings.local.json
 *.log
 .DS_Store
+.build/
+.swiftpm/
+App/Halo.xcodeproj/
+DerivedData/
+*.mlmodel
+*.mlpackage/
+*.mlmodelc/
+Models/

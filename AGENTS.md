@@ -26,12 +26,12 @@ These are load-bearing. Reviewers scrutinize them hardest. Violating one is alwa
 4. **Open-set correctness over recall.** A wrong name on a face is worse than no name. Matching must
    reject below threshold and when the top-2 candidates are ambiguous. Thresholds live in one place
    and are covered by tests.
-5. **Credential safety.** OAuth tokens live only in the iOS Keychain (`expo-secure-store`). Client
-   secrets never ship in the app bundle; flows that need one go through the minimal server proxy.
-6. **Message/social content is private.** Raw message text stays on device. Off-device LLM use (if
-   ever enabled) is opt-in, per-feature, and receives only already-summarized, non-biometric text.
-7. **Frame budget.** Camera frame processing never blocks the JS thread; per-frame work runs in
-   worklets/native. The lens must hold 30 fps on the target device.
+5. **Credential safety.** Tokens and pairing keys (e.g. Mac bridge ↔ phone) live only in the
+   Keychain. No secrets in the repo or the app bundle.
+6. **Message content is private.** Message data stays on the user's own devices (Mac → iPhone).
+   No off-device AI: summaries use on-device Foundation Models only.
+7. **Frame budget.** Camera/vision work never runs on the main actor; embedding is throttled per
+   track. The lens must hold 30 fps on the target iPhone.
 
 ## The build model: master → builders → reviewers
 
@@ -40,8 +40,9 @@ Work is orchestrated, not free-for-all. There are three roles.
 - **Master** (the main session). Owns planning, scaffolding, GitHub issues, dispatching subagents,
   reviewing their PRs via reviewer agents, merging, and release. Master does NOT implement features
   by hand — it delegates. The only things master edits directly are repo-wide scaffold/config
-  (`AGENTS.md`, `CLAUDE.md`, `eslint.config.mjs`, `app.config.ts`, `eas.json`, `vitest.config.ts`,
-  the `src/lib/types.ts` contract, `src/lib/seams.ts`, CI, `.claude/**`) and merge/release glue.
+  (`AGENTS.md`, `CLAUDE.md`, `Packages/HaloKit/Package.swift`, `App/project.yml`, `App/Halo/RootView.swift`,
+  `.swift-format`, `scripts/check.sh`, the `HaloCore` contract `Contract.swift` + `Seams.swift`, CI,
+  `.claude/**`) and merge/release glue.
 - **Builder** subagent. Implements exactly one GitHub issue in an isolated git worktree, on its own
   branch, and opens one PR. Nothing more.
 - **Reviewer** subagent. Reviews one PR read-only and returns APPROVE / REQUEST_CHANGES with concrete
@@ -59,31 +60,37 @@ No direct-to-main feature commits.
 - Waves gate dependencies: a wave only starts when the issues it depends on are merged. Issues within
   a wave must be independent enough to run in parallel; where a soft dependency exists, the
   depended-on interface is stubbed behind an injected seam so both can proceed (pattern:
-  `src/lib/seams.ts`).
+  `Packages/HaloKit/Sources/HaloCore/Seams.swift` — protocols with safe defaults).
 
 ### Model tiers (pick by complexity)
 
 - **haiku** — trivial/mechanical: config, copy, pure single-purpose modules, docs, fixtures.
-- **sonnet** — standard features: screens, UI components, connectors/importers with a clear spec.
+- **sonnet** — standard features: SwiftUI screens, UI components, importers with a clear spec.
 - **opus** — load-bearing logic: the recognition/matching pipeline, frame processors, concurrency,
   the people-graph store and identity resolution, crypto/credentials, cross-module integration.
 
 ### Builder rules
 
-- Work in your assigned isolated worktree. Create branch `issue/<n>-<slug>`. Run `pnpm install` first
-  (worktrees have no `node_modules`; the registry is occasionally flaky — retry).
-- Read the shared contract `src/lib/types.ts` and the modules you depend on before writing. Reuse
-  existing modules; do not reimplement crypto, the store, the matcher, connectors' OAuth, etc.
-- Do NOT modify `src/lib/types.ts`, `src/lib/seams.ts` or `src/lib/store/schema.ts` unless the issue
-  is explicitly about them — flag needed contract changes to master instead.
-- Keep cross-issue couplings behind injected/optional seams so your PR merges without the other issue.
-- All three checks must pass before you open the PR:
-  `pnpm exec eslint .`, `pnpm exec tsc --noEmit`, `pnpm exec vitest run`.
-- Tests live in `tests/**/*.test.ts` — that is the only glob vitest runs. A test file anywhere else
-  (e.g. colocated in `src/`) silently never runs. Keep logic in pure TS modules under `src/lib/**` so
-  it is testable without a device; React Native/native code stays thin. Device e2e flows (Maestro)
-  live in `e2e/` and are deliberately outside that glob.
-- Never commit real personal data, real face images, or tokens. Test fixtures are synthetic.
+- Work in your assigned isolated worktree. Create branch `issue/<n>-<slug>`. First build resolves
+  SwiftPM dependencies (GitHub is occasionally flaky — retry).
+- Read the shared contract (`HaloCore/Contract.swift`, `HaloCore/Seams.swift`) and the modules you
+  depend on before writing. Reuse existing modules; do not reimplement the store, matcher, vision
+  pipeline, digest format, etc.
+- Do NOT modify `Contract.swift`, `Seams.swift`, `Package.swift`, `App/project.yml`, or
+  `HaloStore`'s schema/migrations unless the issue is explicitly about them — flag needed contract,
+  target or dependency changes to master instead. Each issue owns one target (or one app folder);
+  stay inside it. Delete the target's `Placeholder.swift` / `PlaceholderTests.swift` when you replace it.
+- Keep cross-issue couplings behind the seam protocols so your PR merges without the other issue.
+- All three checks must pass before you open the PR: `./scripts/check.sh`
+  (1 `swift format lint --strict`, 2 `swift test` on HaloKit, 3 `xcodebuild` of the iOS app).
+  Without Xcode locally, the script builds only — then CI is the gate: push, open the PR as draft,
+  `gh pr checks <n> --watch`, and mark ready only when green.
+- Tests use Swift Testing (`import Testing`, `@Test`, `#expect`) and live in
+  `Packages/HaloKit/Tests/<Target>Tests/` — the only declared test targets. A test file anywhere else
+  (e.g. under `Sources/` or `App/`) silently never runs. Keep logic in HaloKit so it is testable on the
+  macOS host; `App/` stays thin (views + wiring). Device e2e flows live in `e2e/`.
+- Never commit real personal data, real face images, tokens, or model weights (the repo is public).
+  Test fixtures are synthetic; weights are fetched by `scripts/fetch-models.sh`.
 - PR body: `Closes #<n>`, what changed, how verified, notes for reviewers, any deviations.
 - Commit messages end with a `Co-Authored-By:` line naming the model that actually wrote the change,
   e.g. `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
@@ -96,8 +103,9 @@ No direct-to-main feature commits.
 - Scrutinize the issue's load-bearing invariant hardest — for this project usually one of the
   product invariants above (known-people-only, biometrics-on-device, confirm-before-recognize,
   open-set match correctness, credential safety, frame budget) or test discovery.
-- Verify claims against installed dependency versions when an API is in question (Expo SDK,
-  VisionCamera, Skia, expo-sqlite). Read `node_modules/<pkg>` types/docs. Don't trust training data.
+- Verify claims against installed dependency versions when an API is in question (GRDB in
+  `Packages/HaloKit/.build/checkouts/`, Apple SDK headers/`.swiftinterface` files). Don't trust
+  training data — iOS 26 APIs changed.
 - Return APPROVE or REQUEST_CHANGES with `file:line`, the problem, and a concrete fix. Skip style nits.
   Report to master; do not comment on the PR.
 
@@ -107,8 +115,9 @@ No direct-to-main feature commits.
   re-verify CI.
 - Merge with `gh pr merge <n> --squash`. Do NOT `--delete-branch` (worktree lock) — clean up after the
   wave.
-- Dep-adding PRs conflict on `pnpm-lock.yaml`. Merge one, then have the next builder
-  `git merge origin/main` and regenerate the lock with `pnpm install` (never hand-merge the lockfile).
+- Dependencies and targets are added by master on main (`Package.swift`), so builders don't conflict on
+  `Package.resolved`. If one does conflict: `git merge origin/main`, then `swift package resolve`
+  to regenerate it (never hand-merge it).
 - After each wave: `git checkout main && git pull`, remove `.claude/worktrees`, `git worktree prune`,
   delete merged branches, then verify integrated main (all three checks) before starting the next wave.
 - File non-blocking review findings as follow-up issues rather than blocking a merge.
@@ -129,34 +138,37 @@ markdown, so any agent can follow them by reading the file:
 
 ## Stack
 
-- Expo SDK 58 (RN 0.88, dev client — not Expo Go), New Architecture, TypeScript strict,
-  `expo-router` (routes in `src/app/`).
-- Camera: `react-native-vision-camera` v5 (Nitro; frame processors via `react-native-worklets`
-  `useFrameOutput`) + an ML Kit/Nitro face detection plugin. Face embeddings via an on-device model
-  run in a local Expo native module (CoreML) or `react-native-fast-tflite`. **Model weights must have a
-  license compatible with our use — InsightFace pretrained weights are non-commercial. Record the
-  provenance of any weights in `docs/MODELS.md`.**
-- Overlay: `@shopify/react-native-skia` (holographic label shaders).
-- Local store: `expo-sqlite` with `useSQLCipher: true` (verify with `PRAGMA cipher_version` — without
-  SQLCipher `PRAGMA key` silently does nothing); embeddings matched in-memory.
-- Data sources reality (verified 2026-11): Google Photos = Picker API only (user-picked items);
-  Instagram personal accounts = "Download your information" export import only; X = OAuth API,
-  pay-per-use (~$0.01/resource) or archive import; iMessage = no iOS API, macOS `chat.db` via a Mac
-  companion. Do not build against APIs that no longer exist.
-- Server: minimal Vercel functions only for OAuth flows that need a client secret. No user data stored.
-- Package manager: pnpm. Tests: vitest (`tests/**`), Maestro (`e2e/**`). Builds: EAS.
+- Native iOS 26: Swift 6 (strict concurrency), SwiftUI, AVFoundation, Vision, CoreML, PhotoKit,
+  Contacts, LocalAuthentication, Foundation Models (on-device LLM). Personal prototype, iPhone only.
+- `Packages/HaloKit` — SwiftPM package holding all logic, one target per module, tested on the macOS
+  host with Swift Testing. Only third-party dependency: GRDB (SQLite).
+- `App/` — thin SwiftUI app; the Xcode project is generated by XcodeGen from `App/project.yml`
+  (never commit or hand-edit `Halo.xcodeproj`).
+- `halo-bridge` — macOS CLI (same package) that reads `~/Library/Messages/chat.db` (needs Full Disk
+  Access) and emits a metadata-only `InteractionDigest`.
+- Face embeddings: CoreML model fetched by `scripts/fetch-models.sh` (gitignored). Personal-use
+  prototype, so research-licensed weights are acceptable but are never committed or redistributed;
+  provenance recorded in `docs/MODELS.md`. Apple Vision provides detection/landmarks/quality only — it
+  has no public recognition embedding.
+- Storage: GRDB database file with iOS Data Protection `.complete`; embeddings matched in-memory.
+- AI: on-device only (Foundation Models). No off-device LLM calls.
+- CI: GitHub Actions `macos-26` runs `./scripts/check.sh` on every PR.
+- Data sources (verified 2026-11): Contacts + Apple Photos (on-device), iMessage via Mac bridge.
+  Later: Google Photos (Picker API only — no whole-library access), Instagram (export import only —
+  no personal-account API), X (OAuth, pay-per-use, or archive import).
 
 ## Layout
 
 ```
-src/app/            expo-router screens
-src/lib/types.ts    shared contract (master-owned)
-src/lib/seams.ts    injected-hook registry for cross-issue couplings (master-owned)
-src/lib/<module>/   pure TS logic (matcher, graph, importers, label builder, ...)
-src/native/         thin RN/native adapters (camera, photos, secure store)
-modules/            local Expo native modules (Swift)
-server/             Vercel OAuth proxy
-tests/              vitest — the ONLY place unit tests run from
-e2e/                Maestro flows
-docs/               plan and design notes
+Packages/HaloKit/Package.swift          targets + deps (master-owned)
+Packages/HaloKit/Sources/HaloCore/      Contract.swift + Seams.swift (master-owned)
+Packages/HaloKit/Sources/<Target>/      one module per issue (Store, Matching, Clustering, Tracking,
+                                        Vision, Import, Labels, Lens, UI, BridgeKit)
+Packages/HaloKit/Sources/halo-bridge/   macOS iMessage bridge CLI
+Packages/HaloKit/Tests/<Target>Tests/   Swift Testing — the ONLY place tests run from
+App/project.yml                         XcodeGen spec (master-owned)
+App/Halo/<Feature>/                     SwiftUI screens (Lens, People, Settings, Onboarding)
+scripts/check.sh                        the three checks (CI runs the same)
+e2e/                                    device test notes / UI test plans
+docs/                                   PLAN.md, MODELS.md
 ```

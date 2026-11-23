@@ -21,11 +21,12 @@ Input: `wave-N`.
    - REQUEST_CHANGES: SendMessage the blocking findings to the SAME builder; when it reports back,
      re-review (same reviewer via SendMessage).
    - APPROVE + green `gh pr checks`: `gh pr merge <pr> --squash` (no `--delete-branch`).
-   - Lockfile conflict after a dep-adding merge: tell the next builder to `git merge origin/main` and
-     regenerate with `pnpm install`; re-verify checks.
+   - Conflict after a merge: tell the builder to `git merge origin/main` (regenerate
+     `Package.resolved` with `swift package resolve`, never hand-merge); re-verify checks.
    - FOLLOW-UP items: `gh issue create --label follow-up` (+ a later wave label).
-6. **Contract requests** from builders: master edits `src/lib/types.ts` / `seams.ts` on main via a
-   small scaffold commit, then tells affected builders to merge `origin/main`.
+6. **Contract requests** from builders: master edits `Contract.swift` / `Seams.swift` /
+   `Package.swift` on main via a small scaffold commit, then tells affected builders to merge
+   `origin/main`.
 7. When every wave-N issue is closed, run `/close-wave wave-N`.
 
 Never implement a feature yourself during this loop; never fabricate an agent's result.

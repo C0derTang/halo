@@ -10,22 +10,20 @@ Input: an issue number `<n>`. You are already in an isolated worktree.
 1. **Read the spec.** `gh issue view <n>`. Note acceptance criteria, the load-bearing invariant, the
    wave, the model tier, and any seams you must stub or consume.
 2. **Branch.** `git checkout -b issue/<n>-<short-slug>`.
-3. **Install.** `pnpm install` (retry up to 3 times on registry errors).
-4. **Read before writing.** `src/lib/types.ts`, `src/lib/seams.ts`, and every module the issue
-   depends on. Reuse them. If the contract is missing something, stop and report the proposed diff
-   to master instead of editing it.
-5. **Implement.** Logic in pure TS under `src/lib/<module>/`; keep RN/native adapters thin.
-   Cross-issue couplings go through seams in `src/lib/seams.ts` with a safe default so this PR
-   merges without the other issue.
-6. **Test.** Add `tests/<module>/*.test.ts` (the ONLY discovered location). Cover the invariant the
-   issue names, edge cases, and failure paths. Synthetic fixtures only — no real faces/data.
-7. **Verify — all must pass:**
-   ```sh
-   pnpm exec eslint .
-   pnpm exec tsc --noEmit
-   pnpm exec vitest run
-   ```
-   Confirm your new tests appear in the vitest output (test discovery is a review item).
+3. **Resolve.** `swift package resolve --package-path Packages/HaloKit` (retry up to 3 times).
+4. **Read before writing.** `HaloCore/Contract.swift`, `HaloCore/Seams.swift`, and every module the
+   issue depends on. Reuse them. If the contract, `Package.swift` or `project.yml` needs a change,
+   stop and report the exact proposed diff to master instead of editing it.
+5. **Implement.** Logic in `Packages/HaloKit/Sources/<YourTarget>/`; `App/` code stays thin.
+   Cross-issue couplings go through the `Seams.swift` protocols so this PR merges without the other
+   issue. Replace (delete) your target's `Placeholder.swift`.
+6. **Test.** Swift Testing files in `Packages/HaloKit/Tests/<YourTarget>Tests/` (the ONLY discovered
+   location); delete `PlaceholderTests.swift`. Cover the invariant the issue names, edge cases and
+   failure paths. Synthetic fixtures only — no real faces/data.
+7. **Verify — must pass:** `./scripts/check.sh` then `swift format -i` anything it flags.
+   If Xcode isn't installed locally the script only builds; open the PR as **draft**, run
+   `gh pr checks <pr> --watch`, fix until green, then `gh pr ready <pr>`. Confirm your new tests
+   appear in the CI test log (test discovery is a review item).
 8. **Commit.** Conventional message; last line
    `Co-Authored-By: Claude <your model> <noreply@anthropic.com>`.
 9. **PR.** `git push -u origin HEAD` then `gh pr create` with body:
@@ -40,5 +38,5 @@ Input: an issue number `<n>`. You are already in an isolated worktree.
 10. **Report** to master: PR URL, branch, check results, deviations, contract requests.
 
 On a fix request from master: fix on the same branch, re-run all three checks, push, report again.
-If master asks you to rebase onto a lockfile change: `git merge origin/main`, then `pnpm install` to
-regenerate `pnpm-lock.yaml` (never hand-merge it), re-run checks, push.
+If master asks you to pick up a main change: `git merge origin/main`; on a `Package.resolved`
+conflict run `swift package resolve` to regenerate it (never hand-merge it), re-run checks, push.

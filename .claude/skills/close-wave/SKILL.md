@@ -17,8 +17,8 @@ description: Master playbook — after a wave is merged, clean worktrees/branche
    ```
 3. Verify integrated main from a clean install:
    ```sh
-   pnpm install --frozen-lockfile
-   pnpm exec eslint . && pnpm exec tsc --noEmit && pnpm exec vitest run
+   ./scripts/check.sh
+   gh run list --branch main --limit 1   # CI on main must be green (authoritative without Xcode)
    ```
    If anything fails, file a `wave-N` fix issue and dispatch one builder; do not start wave N+1.
 4. Update `docs/PLAN.md` (mark wave done, note follow-ups) — scaffold commit by master.

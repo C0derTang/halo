@@ -15,3 +15,4 @@
   `/new-skill`). Builders and reviewers load `build-issue` / `review-pr` themselves.
 - When a procedure is repeated a second time, capture it with `/new-skill` instead of re-deriving it.
 - Never fabricate a subagent's result; wait for its notification.
+- Without Xcode locally, CI (`gh pr checks --watch`) is the test gate; builders open draft PRs first.
