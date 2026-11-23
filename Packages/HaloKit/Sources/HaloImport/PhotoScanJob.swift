@@ -420,7 +420,7 @@ public actor PhotoScanJob {
             guard let id = UUID(uuidString: record.id), !members.isEmpty, ids.count == members.count,
                 members.count == record.memberIDs.count, ids.isDisjoint(with: claimed),
                 ids.contains(record.representativeID),
-                let cluster = try restoredCluster(record, id: id, members: members, space: space)
+                let cluster = restoredCluster(record, id: id, members: members, space: space)
             else { continue }
             existing.append(cluster)
             claimed.formUnion(ids)
@@ -431,28 +431,20 @@ public actor PhotoScanJob {
     }
 
     /// Rebuilds a `FaceCluster` for an intact stored record (id, members, representative and
-    /// cohesion as stored; centroid recomputed from the members).
-    ///
-    /// `FaceCluster` has no public initializer, so the clusterer produces a single-member cluster of
-    /// the first member and its public fields are overwritten. Swap for an initializer once
-    /// HaloClustering exposes one.
+    /// cohesion as stored; centroid recomputed from the members). Nil if the record is invalid.
     private func restoredCluster(
         _ record: ClusterRecord, id: UUID, members: [FaceEmbedding], space: EmbeddingSpace
-    ) throws -> FaceCluster? {
-        let seeder = FaceClusterer(config: ClusteringConfig(minClusterSize: 1, minQuality: -.infinity))
-        guard var cluster = try seeder.cluster([members[0]]).clusters.first else { return nil }
+    ) -> FaceCluster? {
         var sum = [Float](repeating: 0, count: space.dimension)
         for member in members {
+            guard member.vector.count == space.dimension else { return nil }
             let unit = Self.normalized(member.vector)
             for d in 0..<space.dimension { sum[d] += unit[d] }
         }
-        cluster.id = id
-        cluster.space = space
-        cluster.memberIDs = record.memberIDs.sorted { $0.uuidString < $1.uuidString }
-        cluster.representativeID = record.representativeID
-        cluster.cohesion = record.cohesion
-        cluster.centroid = Self.normalized(sum)
-        return cluster
+        return try? FaceCluster(
+            id: id, space: space, memberIDs: record.memberIDs,
+            representativeID: record.representativeID, cohesion: record.cohesion,
+            centroid: Self.normalized(sum))
     }
 
     private static func normalized(_ v: [Float]) -> [Float] {
