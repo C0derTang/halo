@@ -63,6 +63,10 @@ public struct FaceClusterer: Sendable {
                 clusters: sortClusters(existing), unclustered: [], lowQuality: sortIDs(lowQuality))
         }
         if existing.contains(where: { $0.space != space }) { throw ClusteringError.mixedEmbeddingSpaces }
+        if existing.contains(where: { $0.centroid.count != space.dimension }) {
+            throw ClusteringError.invalidCluster(
+                id: existing.first { $0.centroid.count != space.dimension }!.id)
+        }
         if existingEmbeddings.contains(where: { $0.space != space }) {
             throw ClusteringError.mixedEmbeddingSpaces
         }
@@ -91,9 +95,10 @@ public struct FaceClusterer: Sendable {
                 result.append(c)
                 continue
             }
-            var members = c.memberIDs.compactMap { pool[$0] }
-            if members.count != c.memberIDs.count {
-                throw ClusteringError.invalidVector(embeddingID: c.id)
+            var members: [FaceEmbedding] = []
+            for id in c.memberIDs {
+                guard let m = pool[id] else { throw ClusteringError.missingMemberEmbedding(id: id) }
+                members.append(m)
             }
             members.append(contentsOf: additions[ci])
             members.sort { $0.id.uuidString < $1.id.uuidString }

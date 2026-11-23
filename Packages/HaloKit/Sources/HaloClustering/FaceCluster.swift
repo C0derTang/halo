@@ -39,6 +39,8 @@ public enum ClusteringError: Error, Equatable {
     case mixedEmbeddingSpaces
     case dimensionMismatch(embeddingID: UUID)
     case invalidVector(embeddingID: UUID)
+    case missingMemberEmbedding(id: UUID)
+    case invalidCluster(id: UUID)
 }
 
 public struct ClusteringConfig: Hashable, Sendable {

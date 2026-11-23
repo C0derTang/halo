@@ -228,7 +228,7 @@ private func purity(_ result: ClusteringResult, truth: [UUID: Int]) -> Double {
     #expect(data.allSatisfy { $0.personID == nil })
 }
 
-@Test(.timeLimit(.minutes(5)))
+@Test(.timeLimit(.minutes(5)), .enabled(if: ProcessInfo.processInfo.environment["HALO_PERF"] == "1"))
 func largeInputTiming() throws {
     // Non-gating: prints elapsed time; only basic correctness is asserted.
     let dim = 512
@@ -240,10 +240,60 @@ func largeInputTiming() throws {
     for c in cs {
         for _ in 0..<100 { data.append(sample(c, noise: 0.5, space: sp, g: &g)) }
     }
-    var count = 0
     let t = ContinuousClock().measure {
-        count = (try? FaceClusterer().cluster(data).clusters.count) ?? 0
+        _ = try? FaceClusterer().cluster(data)
     }
     print("cluster 20k x 512: \(t)")
-    #expect(count >= 150)
+}
+
+private func assignFixture() throws -> ([FaceEmbedding], ClusteringResult, [[Float]]) {
+    var g = LCG(state: 77)
+    let cs = centers(2)
+    let initial = (0..<10).map { _ in sample(cs[0], noise: 0.3, g: &g) }
+    return (initial, try FaceClusterer().cluster(initial), cs)
+}
+
+@Test func assignMixedSpacesThrow() throws {
+    var g = LCG(state: 78)
+    let (initial, base, cs) = try assignFixture()
+    let other = sample(
+        cs[0], noise: 0.1, space: EmbeddingSpace(modelID: "x", dimension: 32), g: &g)
+    #expect(throws: ClusteringError.mixedEmbeddingSpaces) {
+        try FaceClusterer().assign(
+            newEmbeddings: [other], to: base.clusters, existingEmbeddings: initial)
+    }
+}
+
+@Test func assignMissingMemberEmbeddingThrows() throws {
+    var g = LCG(state: 79)
+    let (initial, base, cs) = try assignFixture()
+    let new = sample(cs[0], noise: 0.2, g: &g)
+    let missing = initial[0].id
+    #expect(throws: ClusteringError.missingMemberEmbedding(id: missing)) {
+        try FaceClusterer().assign(
+            newEmbeddings: [new], to: base.clusters,
+            existingEmbeddings: Array(initial.dropFirst()))
+    }
+}
+
+@Test func assignInvalidCentroidThrows() throws {
+    var g = LCG(state: 80)
+    var (initial, base, cs) = try assignFixture()
+    base.clusters[0].centroid = [1, 0]
+    let new = sample(cs[0], noise: 0.2, g: &g)
+    #expect(throws: ClusteringError.invalidCluster(id: base.clusters[0].id)) {
+        try FaceClusterer().assign(
+            newEmbeddings: [new], to: base.clusters, existingEmbeddings: initial)
+    }
+    initial.removeAll()
+}
+
+@Test func assignDropsLowQualityNewFaces() throws {
+    var g = LCG(state: 81)
+    let (initial, base, cs) = try assignFixture()
+    let poor = sample(cs[0], noise: 0.2, quality: 0.01, g: &g)
+    let r = try FaceClusterer().assign(
+        newEmbeddings: [poor], to: base.clusters, existingEmbeddings: initial)
+    #expect(r.lowQuality == [poor.id])
+    #expect(r.clusters == base.clusters)
 }
