@@ -63,6 +63,8 @@ import Testing
         try await store.setScanCursor("synthetic-scan-cursor-41")
         try await store.logRecognition(of: world.known.id, at: Fixture.fixedDate)
         try await store.saveDigest(DigestTests.digest(["+15550000041"], at: 41))
+        try await store.addHook(
+            MemoryHook(personID: world.known.id, text: "synthetic-hook-41", source: .userNote))
 
         for table in try await store.userTables() {
             #expect(try await store.rowCount(table) > 0, "fixture leaves \(table) empty")
@@ -70,7 +72,7 @@ import Testing
         let strings = [
             world.known.displayName, world.newcomer.displayName, world.known.id.description,
             world.newcomer.id.description, "+15550000041", "cluster-erase-me", "cluster-pending-41",
-            "synthetic-scan-cursor-41",
+            "synthetic-scan-cursor-41", "synthetic-hook-41",
         ]
         return strings.map { Data($0.utf8) } + world.faces.flatMap(Fixture.needles(for:))
     }
@@ -89,7 +91,7 @@ import Testing
         }
         #expect(!store.hasPendingErasure)
         #expect(Fixture.rawTraces(of: needles, at: path) == [])
-        #expect(try await store.appliedMigrations() == ["v1", "v2"])  // schema survives
+        #expect(try await store.appliedMigrations() == ["v1", "v2", "v4_memoryHooks"])  // schema survives
 
         // Still usable afterwards, and the erasure holds across a reopen.
         try await store.upsert(Fixture.person("Fresh Start", confirmed: true))

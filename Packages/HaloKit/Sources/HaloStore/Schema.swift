@@ -10,9 +10,10 @@ enum Schema {
     static let cluster = "cluster"
     static let clusterMember = "cluster_member"
     static let scanState = "scan_state"
+    static let memoryHook = "memory_hook"
 
     /// Every table that can hold a row about a specific person (by `personId`).
-    static let personScopedTables = [identity, embedding, recognitionLog]
+    static let personScopedTables = [identity, embedding, recognitionLog, memoryHook]
 
     static var migrator: DatabaseMigrator {
         var migrator = DatabaseMigrator()
@@ -95,6 +96,22 @@ enum Schema {
                         id INTEGER PRIMARY KEY NOT NULL CHECK (id = 1),
                         cursor TEXT NOT NULL
                     );
+                    """)
+        }
+        migrator.registerMigration("v4_memoryHooks") { db in
+            // Short "what to say" notes per person (invariants 3 + 6). The FK cascade is a backstop;
+            // `forget` also deletes these rows explicitly (see `Schema.personScopedTables`).
+            try db.execute(
+                sql: """
+                    CREATE TABLE memory_hook (
+                        id TEXT PRIMARY KEY NOT NULL,
+                        personId TEXT NOT NULL REFERENCES person(id) ON DELETE CASCADE,
+                        text TEXT NOT NULL,
+                        source TEXT NOT NULL,
+                        createdAt REAL NOT NULL,
+                        expiresAt REAL
+                    );
+                    CREATE INDEX memory_hook_personId ON memory_hook(personId);
                     """)
         }
         return migrator
