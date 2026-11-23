@@ -18,10 +18,12 @@ public enum MemoryRefreshOutcome: Equatable, Sendable {
 public struct MemoryRefreshReport: Equatable, Sendable {
     /// People whose `.onDeviceSummary` hooks were replaced with freshly generated ones.
     public var regenerated: Set<PersonID> = []
-    /// People whose summary hooks were cleared because they have no message excerpts any more.
+    /// People whose summary hooks were cleared: no message excerpts any more, or no longer confirmed.
     public var cleared: Set<PersonID> = []
-    /// People whose generation failed; retried on the next run.
+    /// People whose generation failed this run; retried after `MemoryHookRefresher.failureBackoff`.
     public var failed: Set<PersonID> = []
+    /// People skipped because an earlier failure's backoff has not elapsed yet.
+    public var backingOff: Set<PersonID> = []
     /// People skipped because the per-run generation cap was reached; picked up on the next run.
     public var deferred: Set<PersonID> = []
 
@@ -30,16 +32,20 @@ public struct MemoryRefreshReport: Equatable, Sendable {
 
 /// Keeps `.onDeviceSummary` memory hooks in step with the latest interaction digest.
 ///
-/// - Only CONFIRMED people get hooks (invariant 3). Unconfirmed people are never sent to the model.
+/// - Only CONFIRMED people get hooks (invariant 3). Unconfirmed people are never sent to the model,
+///   and a person who stops being confirmed has their `.onDeviceSummary` hooks cleared.
 /// - A person is regenerated only when the hash of their input (name + excerpts) changed since the
 ///   last successful run. Hashes live in memory only.
 /// - Rate limited (`minimumInterval` between completed runs, `maxGenerationsPerRun` model calls per
-///   run), cancellable (honours task cancellation between people and never writes after it), and
+///   run, per-person exponential backoff after failures, with never-tried people served before
+///   recently failed ones), cancellable (honours task cancellation between people and never writes after it), and
 ///   isolated to this actor, so it never runs on the main actor.
 /// - Invariant 6: excerpts go only to the injected on-device generator; nothing is logged.
 public actor MemoryHookRefresher {
     public static let defaultMinimumInterval: TimeInterval = 15 * 60
     public static let defaultMaxGenerationsPerRun = 8
+    /// Wait before retrying a person after their 1st, 2nd, 3rd+ consecutive generation failure.
+    public static let failureBackoff: [TimeInterval] = [60 * 60, 6 * 60 * 60, 24 * 60 * 60]
 
     private let store: any MemoryStoring & PeopleStoring
     private let generator: any MemoryHookGenerating
@@ -50,6 +56,8 @@ public actor MemoryHookRefresher {
     private var inputHashes: [PersonID: String] = [:]
     private var lastCompletedRun: Date?
     private var isRunning = false
+    /// Consecutive generation failures per person and when they may be retried. Memory only.
+    private var failures: [PersonID: (count: Int, retryAfter: Date)] = [:]
 
     /// - Parameter normalizeHandle: MUST be the normalizer the importer used for identity values
     ///   (the app passes `HandleNormalizer(region:).normalize`), otherwise handles will not match.
@@ -92,12 +100,23 @@ public actor MemoryHookRefresher {
             $0.id.rawValue.uuidString < $1.id.rawValue.uuidString
         }
 
-        // Forgotten or unconfirmed people must not keep a cached hash.
+        // Forgotten or unconfirmed people must not keep cached state.
         let confirmedIDs = Set(confirmed.map(\.id))
         inputHashes = inputHashes.filter { confirmedIDs.contains($0.key) }
+        failures = failures.filter { confirmedIDs.contains($0.key) }
 
         var report = MemoryRefreshReport()
-        var generations = 0
+
+        // A person who is no longer confirmed loses their generated hooks (invariant 3).
+        for person in people where !person.confirmed {
+            try Task.checkCancellation()
+            let existing = try await store.hooks(for: person.id, now: now)
+            guard existing.contains(where: { $0.source == .onDeviceSummary }) else { continue }
+            try await store.replaceHooks(for: person.id, source: .onDeviceSummary, with: [])
+            report.cleared.insert(person.id)
+        }
+
+        var pending: [(person: Person, messages: [InteractionDigest.DigestMessage], hash: String)] = []
         for person in confirmed {
             try Task.checkCancellation()
             let messages = excerpts[person.id] ?? []
@@ -107,9 +126,28 @@ public actor MemoryHookRefresher {
             if messages.isEmpty {
                 try await store.replaceHooks(for: person.id, source: .onDeviceSummary, with: [])
                 inputHashes[person.id] = hash
+                failures[person.id] = nil
                 report.cleared.insert(person.id)
                 continue
             }
+            if let failure = failures[person.id], now < failure.retryAfter {
+                report.backingOff.insert(person.id)
+                continue
+            }
+            pending.append((person, messages, hash))
+        }
+
+        // Never-tried / deferred people go first, then previously failed ones (longest-expired
+        // backoff first), so persistently failing people cannot starve everyone else.
+        pending.sort { a, b in
+            let ra = failures[a.person.id]?.retryAfter ?? .distantPast
+            let rb = failures[b.person.id]?.retryAfter ?? .distantPast
+            return ra != rb ? ra < rb : a.person.id.rawValue.uuidString < b.person.id.rawValue.uuidString
+        }
+
+        var generations = 0
+        for (person, messages, hash) in pending {
+            try Task.checkCancellation()
             guard generations < maxGenerationsPerRun else {
                 report.deferred.insert(person.id)
                 continue
@@ -122,14 +160,16 @@ public actor MemoryHookRefresher {
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
-                // Not logged (the error may describe message content); retried next run.
+                // Not logged (the error may describe message content); retried after a backoff.
                 try Task.checkCancellation()
+                recordFailure(person.id, now: now)
                 report.failed.insert(person.id)
                 continue
             }
             try Task.checkCancellation()
             // The model may have become unavailable mid-run: never wipe hooks because of that.
             if generated.isEmpty, await !generator.isAvailable {
+                recordFailure(person.id, now: now)
                 report.failed.insert(person.id)
                 continue
             }
@@ -138,11 +178,18 @@ public actor MemoryHookRefresher {
             let hooks = MemoryHookPolicy.makeHooks(for: person.id, texts: generated.map(\.text), now: now)
             try await store.replaceHooks(for: person.id, source: .onDeviceSummary, with: hooks)
             inputHashes[person.id] = hash
+            failures[person.id] = nil
             report.regenerated.insert(person.id)
         }
 
         lastCompletedRun = now
         return .completed(report)
+    }
+
+    private func recordFailure(_ id: PersonID, now: Date) {
+        let count = (failures[id]?.count ?? 0) + 1
+        let delay = Self.failureBackoff[min(count, Self.failureBackoff.count) - 1]
+        failures[id] = (count, now.addingTimeInterval(delay))
     }
 
     // MARK: Attribution

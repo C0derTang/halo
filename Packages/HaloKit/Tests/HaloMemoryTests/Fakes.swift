@@ -62,6 +62,8 @@ actor FakeHookGenerator: MemoryHookGenerating {
     var available: Bool
     var texts: [String]
     var failure: (any Error)?
+    /// People for whom generation always throws.
+    var failingPeople: Set<PersonID> = []
     /// When set, `hooks` suspends until `release()` (used to test cancellation mid-run).
     var blockUntilReleased = false
     private(set) var calls: [(person: PersonID, messages: [InteractionDigest.DigestMessage])] = []
@@ -78,6 +80,7 @@ actor FakeHookGenerator: MemoryHookGenerating {
     func setAvailable(_ value: Bool) { available = value }
     func setTexts(_ value: [String]) { texts = value }
     func setFailure(_ error: (any Error)?) { failure = error }
+    func setFailing(_ people: Set<PersonID>) { failingPeople = people }
     func setBlocking(_ value: Bool) { blockUntilReleased = value }
     var callCount: Int { calls.count }
     var askedAbout: [PersonID] { calls.map(\.person) }
@@ -101,6 +104,7 @@ actor FakeHookGenerator: MemoryHookGenerating {
         started = []
         if blockUntilReleased { await withCheckedContinuation { waiters.append($0) } }
         if let failure { throw failure }
+        if failingPeople.contains(person.id) { throw FakeGenerationError() }
         return texts.map {
             MemoryHook(personID: person.id, text: $0, source: .onDeviceSummary, createdAt: now)
         }

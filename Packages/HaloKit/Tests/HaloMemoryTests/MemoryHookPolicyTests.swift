@@ -12,6 +12,14 @@ import Testing
         "Just came out as gay", "Bisexual and proud", "On Tinder again", "Back on Grindr",
         "Paid off the mortgage", "Owes me 50 bucks", "Got a $5k raise", "Salary bump at Acme",
         "Struggling with debt", "Got laid off", "Into crypto now", "Rent went up",
+        // Gaps closed in review.
+        "Came out as trans", "Is non-binary now", "Non binary and happy", "Back on her meds",
+        "Quit drugs last year", "Drug test at work", "Her dad died", "Death in the family",
+        "Six months sober", "Down with the flu", "Found Jesus", "Volunteers at the temple",
+        "New pastor at work", "Training to be a priest", "Talked to the rabbi", "Met the imam",
+        "Very spiritual lately", "Made a million dollars", "Owes 20 dollars", "Switched banks",
+        "Paid in cash", "Got a big bonus", "Makes 50k now", "Sold it for 2.5m", "Started dating Sam",
+        "New boyfriend Leo", "Moved in with girlfriend", "Getting divorced", "Ex-boyfriend moved",
     ])
     func sensitiveTopicsAreRejected(text: String) {
         #expect(SensitiveTopicFilter.isSensitive(text))
@@ -22,9 +30,27 @@ import Testing
         "Started a new job at Acme", "Training for a marathon", "Illustrator at Pixar",
         "Moved to Essex", "Took a taxi to Lisbon", "Owen got a puppy", "Watched Godzilla",
         "Learning to spray paint", "Rental car in Tahoe", "Building a treehouse",
+        "Transferred to the Berlin office", "Fluent in Portuguese", "Loves cashews",
+        "Binary search nerd", "Riverbank picnic fan", "Rafting the rapids",
     ])
     func harmlessHooksPass(text: String) {
         #expect(!SensitiveTopicFilter.isSensitive(text))
+        #expect(MemoryHookPolicy.sanitize([text]) == [text])
+    }
+
+    @Test(arguments: [
+        "Blog: https://example.com", "Check www.example.org", "Email ana@example.com",
+        "Now at acme.io", "Number is 5550001", "Call 555-000-1234", "Call (555) 000 1234",
+        "Zip code 94110", "ftp://files", "DM me @ana_lima",
+    ])
+    func linksEmailsAndPhoneNumbersAreRejected(text: String) {
+        #expect(MemoryHookPolicy.containsContactOrLink(text))
+        #expect(MemoryHookPolicy.sanitize([text]).isEmpty)
+    }
+
+    @Test(arguments: ["Moved to St. Louis", "Class of 2019", "Ran 3 races in May", "Has 2 kids"])
+    func ordinaryPunctuationAndShortNumbersPass(text: String) {
+        #expect(!MemoryHookPolicy.containsContactOrLink(text))
         #expect(MemoryHookPolicy.sanitize([text]) == [text])
     }
 

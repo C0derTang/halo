@@ -24,12 +24,26 @@ public enum MemoryHookPolicy {
         for raw in texts {
             let text = raw.split(whereSeparator: \.isWhitespace).joined(separator: " ")
             guard !text.isEmpty, text.count <= maxLength else { continue }
-            guard !SensitiveTopicFilter.isSensitive(text) else { continue }
+            guard !SensitiveTopicFilter.isSensitive(text), !containsContactOrLink(text) else { continue }
             guard seen.insert(text.lowercased()).inserted else { continue }
             kept.append(text)
             if kept.count == maxHooks { break }
         }
         return kept
+    }
+
+    /// True for anything that looks like a URL, email, domain or phone number. Hooks are about the
+    /// person, never a way to reach a site or a number (this also blunts prompt-injected links).
+    static func containsContactOrLink(_ text: String) -> Bool {
+        let lowered = text.lowercased()
+        if lowered.contains("://") || lowered.contains("www.") || lowered.contains("@") { return true }
+        let patterns = [
+            // Domain-like token: "acme.com", "news.example.co".
+            #"[a-z0-9-]+\.[a-z]{2,}\b"#,
+            // Five or more digits, optionally separated by single spaces, dots, dashes or parens.
+            #"\d(?:[\s().-]?\d){4,}"#,
+        ]
+        return patterns.contains { lowered.range(of: $0, options: .regularExpression) != nil }
     }
 
     /// Builds the stored hooks for `person` from generated texts, enforcing the policy: sanitized
@@ -56,37 +70,55 @@ public enum SensitiveTopicFilter {
         "disease", "disorder", "covid", "virus", "infection", "rehab", "mental", "diabet", "injur",
         "symptom", "prescription", "psychiatr", "addict", "overdose", "allerg", "disab", "dementia",
         "alzheimer", "adhd", "autis", "fertil", "ivf", "abortion", "std", "hiv", "aids", "funeral",
+        "meds", "drug", "died", "death", "sober", "flu",
         // Religion
         "relig", "church", "mosque", "synagogue", "pray", "bible", "quran", "koran", "torah",
         "christian", "catholic", "protestant", "muslim", "islam", "jewish", "judaism", "hindu",
         "buddhis", "sikh", "atheis", "god", "faith", "baptis", "mormon", "ramadan", "passover",
-        "sermon", "worship",
+        "sermon", "worship", "jesus", "temple", "pastor", "priest", "rabbi", "imam", "spiritu",
         // Sexuality
         "sex", "sexy", "sexual", "gay", "lesbian", "bisexual", "queer", "lgbt", "transgender",
-        "nonbinary", "homosex", "heterosex", "asexual", "hookup", "tinder", "grindr", "porn",
+        "nonbinary", "homosex", "heterosex", "asexual", "hookup", "tinder", "grindr", "porn", "trans",
+        "dating", "boyfriend", "girlfriend", "divorc",
         // Finances
         "debt", "loan", "mortgage", "salary", "salaries", "wage", "bankrupt", "money", "broke",
         "paycheck", "income", "credit", "owe", "owes", "owed", "owing", "investm", "investing",
         "investor", "stock", "crypto", "bitcoin", "rent", "rented", "renting", "finance", "financial",
         "tax", "taxes", "afford", "savings", "inheritance", "payment", "bills", "unemploy", "laid",
-        "layoff", "fired", "welfare",
+        "layoff", "fired", "welfare", "dollar", "bank", "cash", "bonus",
     ]
 
     /// Stems short or common enough that prefix matching would misfire ("ill" vs "illustrator",
     /// "god" vs "godzilla", "owe" vs "owen", "sex" vs "sextet", "tax" vs "taxi").
     static let exactOnly: Set<String> = [
         "ill", "god", "owe", "owes", "owed", "std", "aids", "laid", "broke", "sex", "gay", "rent",
-        "stock", "bills", "tax", "ivf", "hiv", "sikh", "wage",
+        "stock", "bills", "tax", "ivf", "hiv", "sikh", "wage", "trans", "meds", "died", "flu", "imam",
+        "cash",
     ]
+
+    /// Money amounts like "50k", "2.5m", "3bn".
+    static let amountPattern = #"\b\d+(?:[.,]\d+)?\s?(?:k|m|bn|mil)\b"#
 
     /// Characters that on their own mark a money detail.
     static let currencySymbols: Set<Character> = ["$", "€", "£", "¥", "₹", "₩", "₽", "₿"]
 
     public static func isSensitive(_ text: String) -> Bool {
         if text.contains(where: { currencySymbols.contains($0) }) { return true }
-        let words = text.lowercased()
-            .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
-            .map(String.init)
+        let lowered = text.lowercased()
+        if lowered.range(of: amountPattern, options: .regularExpression) != nil { return true }
+        // Match both the hyphen-joined form ("non-binary" -> "nonbinary") and each part
+        // ("ex-boyfriend" -> "boyfriend").
+        let split: (String) -> [String] = {
+            $0.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init)
+        }
+        let joined = lowered.replacingOccurrences(of: "-", with: "")
+            .replacingOccurrences(of: "\u{2010}", with: "")
+        let parts = split(lowered)
+        // Space-separated compounds ("non binary") are matched as exact whole stems only, so
+        // prefix stems cannot fire across a word boundary ("the rapids" is not "therap...").
+        let stemSet = Set(stems)
+        for (a, b) in zip(parts, parts.dropFirst()) where stemSet.contains(a + b) { return true }
+        let words = Set(parts + split(joined))
         for word in words {
             for stem in stems {
                 if exactOnly.contains(stem) {

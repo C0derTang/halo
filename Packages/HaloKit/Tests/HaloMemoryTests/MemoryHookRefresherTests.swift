@@ -296,8 +296,102 @@ import Testing
         #expect(await store.allHooks(for: ana.id).isEmpty)
 
         await generator.setFailure(nil)
+        // Backing off for the first hour after a failure...
         #expect(
-            try report(try await refresher.refresh(now: t0.addingTimeInterval(1))).regenerated == [ana.id])
+            try report(try await refresher.refresh(now: t0.addingTimeInterval(1))).backingOff == [ana.id])
+        #expect(await generator.callCount == 1)
+        // ...then retried.
+        #expect(
+            try report(try await refresher.refresh(now: t0.addingTimeInterval(3600))).regenerated == [ana.id])
+    }
+
+    static func fixedPerson(_ n: Int, _ name: String) -> Person {
+        let uuid = UUID(uuidString: String(format: "00000000-0000-0000-0000-%012d", n))!
+        return Person(id: PersonID(uuid), displayName: name, confirmed: true)
+    }
+
+    @Test func failureBackoffGrowsOneHourSixHoursOneDay() async throws {
+        let (store, generator, ana, _) = await makeWorld()
+        await generator.setFailing([ana.id])
+        let refresher = MemoryHookRefresher(store: store, generator: generator, minimumInterval: 0)
+        let hour: TimeInterval = 3600
+
+        var now = t0
+        #expect(try report(try await refresher.refresh(now: now)).failed == [ana.id])  // 1st failure
+        // Each retry fails again; the wait grows 1h -> 6h -> 24h -> 24h.
+        for wait in [hour, 6 * hour, 24 * hour, 24 * hour] {
+            let calls = await generator.callCount
+            #expect(
+                try report(try await refresher.refresh(now: now.addingTimeInterval(wait - 1))).backingOff
+                    == [ana.id])
+            #expect(await generator.callCount == calls)
+            now = now.addingTimeInterval(wait)
+            #expect(try report(try await refresher.refresh(now: now)).failed == [ana.id])
+            #expect(await generator.callCount == calls + 1)
+        }
+
+        // Success resets the backoff.
+        await generator.setFailing([])
+        now = now.addingTimeInterval(24 * hour)
+        #expect(try report(try await refresher.refresh(now: now)).regenerated == [ana.id])
+    }
+
+    @Test func persistentlyFailingPeopleDoNotStarveOthers() async throws {
+        let store = FakeMemoryStore()
+        // Failing people sort FIRST by id, so a fixed order would serve them before anyone else.
+        let failing = (1...3).map { Self.fixedPerson($0, "F\($0)") }
+        let good = Self.fixedPerson(9, "Good")
+        var entries: [InteractionDigest.Entry] = []
+        for person in failing + [good] {
+            await store.seed(person, handles: [(.email, "\(person.displayName)@example.com")])
+            entries.append(Fixture.entry("\(person.displayName)@example.com", [Fixture.message("Hi")]))
+        }
+        await store.setDigest(Fixture.digest(entries))
+        let generator = FakeHookGenerator()
+        await generator.setFailing(Set(failing.map(\.id)))
+        let refresher = MemoryHookRefresher(
+            store: store, generator: generator, minimumInterval: 0, maxGenerationsPerRun: 3)
+
+        let first = try report(try await refresher.refresh(now: t0))
+        #expect(first.failed == Set(failing.map(\.id)))
+        #expect(first.deferred == [good.id])
+
+        // Next run: the failures are backing off and do not use the cap, so Good gets served.
+        let second = try report(try await refresher.refresh(now: t0.addingTimeInterval(60)))
+        #expect(second.regenerated == [good.id])
+        #expect(second.backingOff == Set(failing.map(\.id)))
+
+        // After the backoff, a newcomer (sorting LAST by id) is served before the retries.
+        let newcomer = Self.fixedPerson(99, "New")
+        await store.seed(newcomer, handles: [(.email, "New@example.com")])
+        await store.setDigest(
+            Fixture.digest(entries + [Fixture.entry("New@example.com", [Fixture.message("Hello")])]))
+        let third = try report(try await refresher.refresh(now: t0.addingTimeInterval(3600)))
+        #expect(third.regenerated == [newcomer.id])
+        #expect(third.failed.count == 2)
+        #expect(third.deferred.count == 1)
+        #expect(await generator.askedAbout.suffix(3).first == newcomer.id)
+    }
+
+    @Test func unconfirmingAPersonClearsTheirSummaryHooks() async throws {
+        let (store, generator, ana, _) = await makeWorld()
+        let refresher = MemoryHookRefresher(store: store, generator: generator, minimumInterval: 0)
+        _ = try await refresher.refresh(now: t0)
+        try await store.addHook(
+            MemoryHook(personID: ana.id, text: "Loves jazz", source: .userNote, createdAt: t0))
+        #expect(await store.allHooks(for: ana.id).count == 2)
+
+        await store.setConfirmed(ana.id, false)
+        let unconfirmed = try report(try await refresher.refresh(now: t0.addingTimeInterval(1)))
+
+        #expect(unconfirmed.cleared == [ana.id])
+        #expect(await store.allHooks(for: ana.id).map(\.source) == [.userNote])
+        #expect(await generator.callCount == 1)
+
+        // Re-confirming regenerates (the cached hash was dropped with the confirmation).
+        await store.setConfirmed(ana.id, true)
+        #expect(
+            try report(try await refresher.refresh(now: t0.addingTimeInterval(2))).regenerated == [ana.id])
     }
 
     // MARK: Cancellation
