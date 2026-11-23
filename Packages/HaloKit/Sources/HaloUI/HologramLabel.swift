@@ -18,6 +18,14 @@ public struct HologramLabel: View {
         self.state = state
     }
 
+    /// Title, subtitle and the chips actually shown on the label, comma separated.
+    static func accessibilityText(for data: LabelData) -> String {
+        var parts = [data.title]
+        if let subtitle = data.subtitle, !subtitle.isEmpty { parts.append(subtitle) }
+        parts += HologramLayout.visibleChips(data).map(\.text)
+        return parts.joined(separator: ", ")
+    }
+
     private var visible: Bool { shown && state != .lost }
 
     public var body: some View {
@@ -39,7 +47,7 @@ public struct HologramLabel: View {
         .animation(reduceMotion ? .easeOut(duration: 0.15) : .easeOut(duration: 0.3), value: visible)
         .allowsHitTesting(false)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(Text(data.title))
+        .accessibilityLabel(Text(Self.accessibilityText(for: data)))
         .onAppear { shown = true }
     }
 }
@@ -139,6 +147,8 @@ struct Scanlines: View {
 struct FringedText: View {
     let text: String
     let font: Font
+    var lineLimit: Int = 1
+    var minimumScaleFactor: CGFloat = 1
 
     var body: some View {
         ZStack(alignment: .leading) {
@@ -149,7 +159,8 @@ struct FringedText: View {
             Text(text).foregroundStyle(.white).blendMode(.screen)
         }
         .font(font)
-        .lineLimit(1)
+        .lineLimit(lineLimit)
+        .minimumScaleFactor(minimumScaleFactor)
         .shadow(color: HoloPalette.cyan, radius: 4)
     }
 }
