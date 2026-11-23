@@ -159,22 +159,52 @@ import Testing
         #expect(!fm.fileExists(atPath: dead.path))
         for d in [live, garbage, groupPID, noPID] { #expect(fm.fileExists(atPath: d.path)) }
 
-        // Far in the future: everything old is swept except the live run's snapshot.
+        // Hours later: everything old is swept except the live run's snapshot.
         let removed = ChatDatabaseReader.removeStaleSnapshots(
-            in: tmp, olderThan: 300, now: Date().addingTimeInterval(24 * 3600))
+            in: tmp, olderThan: 300, now: Date().addingTimeInterval(23 * 3600))
         #expect(removed == 3)
         #expect(fm.fileExists(atPath: live.path))
+
+        // Past the 24 h cap even a "live" pid (possibly reused) no longer protects it.
+        #expect(
+            ChatDatabaseReader.removeStaleSnapshots(
+                in: tmp, olderThan: 300, now: Date().addingTimeInterval(25 * 3600)) == 1)
+        #expect(!fm.fileExists(atPath: live.path))
+    }
+
+    @Test func livePidCapIsConfigurable() throws {
+        let fm = FileManager.default
+        let tmp = fm.temporaryDirectory.appendingPathComponent("sweep-\(UUID())")
+        let snap = tmp.appendingPathComponent("\(ChatDatabaseReader.snapshotPrefix)live")
+        try fm.createDirectory(at: snap, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tmp) }
+        let pidFile = snap.appendingPathComponent(ChatDatabaseReader.pidFileName)
+        try Data("\(getpid())".utf8).write(to: pidFile)
+        // Backdate the claim: an old pid file with a live pid is treated as pid reuse.
+        try fm.setAttributes(
+            [.modificationDate: Date().addingTimeInterval(-2 * 3600)], ofItemAtPath: pidFile.path)
+        #expect(ChatDatabaseReader.removeStaleSnapshots(in: tmp, maxLiveAge: 3 * 3600) == 0)
+        #expect(ChatDatabaseReader.removeStaleSnapshots(in: tmp, maxLiveAge: 3600) == 1)
     }
 
     @Test func readerWritesOwnPidFile() throws {
+        let fm = FileManager.default
         let db = try fixture()
         let reader = try ChatDatabaseReader(url: db.url)
         let dir = URL(fileURLWithPath: reader.queue.path).deletingLastPathComponent()
         #expect(ChatDatabaseReader.ownerPID(of: dir) == getpid())
-        // A sweep from another run, however late, leaves this live snapshot alone.
-        ChatDatabaseReader.removeStaleSnapshots(
-            in: dir.deletingLastPathComponent(), olderThan: 0, now: Date().addingTimeInterval(86_400))
-        #expect(FileManager.default.fileExists(atPath: reader.queue.path))
+
+        // Sweep a scratch copy (never the real $TMPDIR, where parallel tests keep snapshots):
+        // however aggressive the sweep, the live owner's snapshot stays.
+        let scratch = fm.temporaryDirectory.appendingPathComponent("sweep-\(UUID())")
+        try fm.createDirectory(at: scratch, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: scratch) }
+        let copy = scratch.appendingPathComponent(dir.lastPathComponent)
+        try fm.copyItem(at: dir, to: copy)
+        #expect(
+            ChatDatabaseReader.removeStaleSnapshots(
+                in: scratch, olderThan: 0, now: Date().addingTimeInterval(3600)) == 0)
+        #expect(fm.fileExists(atPath: copy.path))
         #expect(try reader.messageRecords().count == 3)
     }
 

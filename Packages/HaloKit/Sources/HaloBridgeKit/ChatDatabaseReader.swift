@@ -32,7 +32,7 @@ public enum ChatDatabaseError: Error, CustomStringConvertible, Equatable {
 /// column; older schemas without it are read unfiltered (the column is never assumed).
 ///
 /// Each snapshot directory holds an `owner.pid` file; the stale-snapshot sweep never deletes a
-/// snapshot whose owner process is still alive, however old it is.
+/// snapshot whose owner process is still alive (up to a 24 h cap against pid reuse).
 public final class ChatDatabaseReader: Sendable {
     public static var defaultURL: URL {
         URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Messages/chat.db")
@@ -59,14 +59,22 @@ public final class ChatDatabaseReader: Sendable {
         kill(pid, 0) == 0 || errno == EPERM
     }
 
+    static func modificationDate(_ url: URL) -> Date? {
+        (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+    }
+
     /// Removes snapshot directories left behind by a crashed run (they hold full message
-    /// bodies). A snapshot whose `owner.pid` names a live process is always kept. Otherwise
-    /// a snapshot with a dead owner is removed, and one without a pid file (an owner that has
-    /// not written it yet, or an older build) is removed once older than `olderThan` seconds.
+    /// bodies).
+    /// - A snapshot whose `owner.pid` names a live process is kept, but only while the pid file
+    ///   is younger than `maxLiveAge` (24 h): a reused pid can't keep message bodies around
+    ///   indefinitely, and no real run takes that long.
+    /// - A snapshot with a dead owner is removed immediately.
+    /// - One without a valid pid file (an owner that has not written it yet, or an older build)
+    ///   is removed once older than `olderThan` seconds.
     @discardableResult
     static func removeStaleSnapshots(
         in tempDir: URL = FileManager.default.temporaryDirectory, olderThan age: TimeInterval = 300,
-        now: Date = Date()
+        maxLiveAge: TimeInterval = 24 * 3600, now: Date = Date()
     ) -> Int {
         let fm = FileManager.default
         guard
@@ -76,11 +84,10 @@ public final class ChatDatabaseReader: Sendable {
         var removed = 0
         for item in items where item.lastPathComponent.hasPrefix(snapshotPrefix) {
             if let pid = ownerPID(of: item) {
-                if isAlive(pid) { continue }
+                let claimed = modificationDate(item.appendingPathComponent(pidFileName))
+                if isAlive(pid), let claimed, now.timeIntervalSince(claimed) < maxLiveAge { continue }
             } else {
-                let modified = (try? item.resourceValues(forKeys: [.contentModificationDateKey]))?
-                    .contentModificationDate
-                if let modified, now.timeIntervalSince(modified) < age { continue }
+                if let modified = modificationDate(item), now.timeIntervalSince(modified) < age { continue }
             }
             if (try? fm.removeItem(at: item)) != nil { removed += 1 }
         }

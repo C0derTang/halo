@@ -115,7 +115,39 @@ import Testing
             Issue.record("expected export")
             return
         }
-        #expect(real.region == (Locale.current.region?.identifier ?? "US").uppercased())
+        #expect(real.region == (BridgeCLI.localeRegion ?? BridgeCLI.unknownRegion))
+    }
+
+    @Test func missingLocaleRegionIsUnknownNotUS() throws {
+        guard
+            case .export(let o) = try BridgeCLI.parse(
+                ["export", "--out", "x.halodigest"], defaultRegion: nil)
+        else {
+            Issue.record("expected export")
+            return
+        }
+        #expect(o.region == BridgeCLI.unknownRegion)
+        #expect(o.regionMissing)
+        #expect(!HandleNormalizer.isKnownRegion(o.region))
+        // National numbers are not guessed as +1.
+        #expect(HandleNormalizer(region: o.region).normalize("(415) 555-0132") == "4155550132")
+        var warnings: [String] = []
+        BridgeCLI.warnOnUnknownRegion(o, { warnings.append($0) })
+        #expect(warnings.count == 1)
+        #expect(warnings[0].contains("--region"))
+
+        // An explicit --region wins and needs no warning.
+        guard
+            case .export(let explicit) = try BridgeCLI.parse(
+                ["export", "--out", "x.halodigest", "--region", "US"], defaultRegion: nil)
+        else {
+            Issue.record("expected export")
+            return
+        }
+        #expect(explicit.region == "US" && !explicit.regionMissing)
+        warnings = []
+        BridgeCLI.warnOnUnknownRegion(explicit, { warnings.append($0) })
+        #expect(warnings.isEmpty)
     }
 
     @Test func exportRequiresPairingBeforeReadingChatDB() throws {

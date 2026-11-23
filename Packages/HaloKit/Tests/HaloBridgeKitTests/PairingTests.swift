@@ -114,6 +114,13 @@ import Testing
         #expect(attrs[kSecAttrService as String] as? String == store.service)
         // The lookup query never carries the secret.
         #expect(store.itemQuery(account: "a")[kSecValueData as String] == nil)
+        // Overwrite (SecItemUpdate on errSecDuplicateItem) keeps the protection class current.
+        let update = store.updateAttributes(data: Data([2]))
+        #expect(update[kSecValueData as String] as? Data == Data([2]))
+        #expect(
+            update[kSecAttrAccessible as String] as? String
+                == kSecAttrAccessibleWhenUnlockedThisDeviceOnly as String)
+        #expect(update[kSecAttrAccount as String] == nil)  // identity attributes are not changed
     }
 
     @Test func bridgeKeychainUsesLoginKeychainNonSynced() {

@@ -23,6 +23,8 @@ public enum BridgeCLI {
         var now = Date()
         /// Uppercased ISO region for `HandleNormalizer(region:)`; recorded in the envelope header.
         var region: String
+        /// True when neither `--region` nor the Mac locale supplied a region.
+        var regionMissing = false
     }
 
     enum Command: Equatable {
@@ -33,10 +35,19 @@ public enum BridgeCLI {
 
     struct UsageError: Error { var message: String }
 
-    /// The Mac's region, falling back to US.
-    static var localeRegion: String { Locale.current.region?.identifier ?? "US" }
+    /// CLDR "Unknown Region". Not in `HandleNormalizer`'s table, so national-format numbers
+    /// stay unnormalized instead of being guessed as US.
+    static let unknownRegion = "ZZ"
 
-    static func parse(_ args: [String], defaultRegion: String = localeRegion) throws -> Command {
+    /// The Mac's region, or nil when the locale has none (or one the envelope can't carry).
+    static var localeRegion: String? {
+        guard let id = Locale.current.region?.identifier.uppercased(), DigestEnvelope.isValidRegion(id) else {
+            return nil
+        }
+        return id
+    }
+
+    static func parse(_ args: [String], defaultRegion: String? = localeRegion) throws -> Command {
         switch args.first {
         case "pair":
             guard args.count == 2 else { throw UsageError(message: "pair takes exactly one <payload>") }
@@ -63,7 +74,7 @@ public enum BridgeCLI {
         }
     }
 
-    static func parseDigestOptions(_ args: [String], allowPlaintext: Bool, defaultRegion: String) throws
+    static func parseDigestOptions(_ args: [String], allowPlaintext: Bool, defaultRegion: String?) throws
         -> DigestOptions
     {
         var db: String?
@@ -93,11 +104,13 @@ public enum BridgeCLI {
             i += 1
         }
         guard let out else { throw UsageError(message: "--out is required") }
-        let resolvedRegion = (region ?? defaultRegion).uppercased()
+        let resolvedRegion = (region ?? defaultRegion ?? Self.unknownRegion).uppercased()
         guard DigestEnvelope.isValidRegion(resolvedRegion) else {
             throw UsageError(message: "--region must be an ISO region code such as US or GB")
         }
-        var o = DigestOptions(out: (out as NSString).expandingTildeInPath, region: resolvedRegion)
+        var o = DigestOptions(
+            out: (out as NSString).expandingTildeInPath, region: resolvedRegion,
+            regionMissing: region == nil && defaultRegion == nil)
         if let db { o.db = URL(fileURLWithPath: (db as NSString).expandingTildeInPath) }
         if let now { o.now = now }
         return o
@@ -166,7 +179,11 @@ public enum BridgeCLI {
     }
 
     static func warnOnUnknownRegion(_ o: DigestOptions, _ errorOutput: (String) -> Void) {
-        if !HandleNormalizer.isKnownRegion(o.region) {
+        if o.regionMissing {
+            errorOutput(
+                "halo-bridge: WARNING: this Mac's locale has no region, so national-format phone numbers stay unnormalized. Pass --region (e.g. --region US) to match your contacts."
+            )
+        } else if !HandleNormalizer.isKnownRegion(o.region) {
             errorOutput(
                 "halo-bridge: no calling code known for region \(o.region); national-format numbers stay unnormalized. Pass --region to override."
             )

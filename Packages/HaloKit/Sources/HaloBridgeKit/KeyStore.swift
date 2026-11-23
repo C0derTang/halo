@@ -91,10 +91,24 @@ public struct KeychainKeyStore: KeyStore {
         }
     }
 
+    /// Attributes changed when overwriting an existing item: the value and, where it applies,
+    /// the protection class (so an older item is upgraded to the current one).
+    func updateAttributes(data: Data) -> [String: Any] {
+        var u: [String: Any] = [kSecValueData as String: data]
+        if useDataProtectionKeychain {
+            u[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        }
+        return u
+    }
+
     public func write(_ data: Data, account: String) throws {
-        // Delete + add (rather than update) so the protection class is always the current one.
-        try delete(account: account)
-        let status = SecItemAdd(addAttributes(account: account, data: data) as CFDictionary, nil)
+        // Add first; update in place if it exists. No delete-then-add window in which a crash
+        // or a concurrent reader would find the key missing.
+        var status = SecItemAdd(addAttributes(account: account, data: data) as CFDictionary, nil)
+        if status == errSecDuplicateItem {
+            status = SecItemUpdate(
+                itemQuery(account: account) as CFDictionary, updateAttributes(data: data) as CFDictionary)
+        }
         guard status == errSecSuccess else { throw KeyStoreError.unexpectedStatus(status) }
     }
 

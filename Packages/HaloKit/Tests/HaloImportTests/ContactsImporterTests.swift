@@ -20,7 +20,7 @@ private func ada(name: String = "Ada", org: String = "Acme") -> ContactRecord {
         let src = InMemoryContactsSource(records: [
             ada(), ContactRecord(identifier: "C2", givenName: "Bob"),
         ])
-        let r = try await ContactsImporter(store: store, source: src).importContacts()
+        let r = try await ContactsImporter(store: store, source: src, normalization: us).importContacts()
         #expect(r.created == 2)
         #expect(try await store.allPeople().count == 2)
         let a = try #require(try await store.person(matching: .contact, value: "C1"))
@@ -50,7 +50,7 @@ private func ada(name: String = "Ada", org: String = "Acme") -> ContactRecord {
         p.confirmed = true
         try await store.upsert(p)
         let imp2 = ContactsImporter(
-            store: store, source: InMemoryContactsSource(records: [ada(name: "Augusta")]))
+            store: store, source: InMemoryContactsSource(records: [ada(name: "Augusta")]), normalization: us)
         _ = try await imp2.importContacts()
         #expect(try await store.person(p.id)?.confirmed == true)
     }
@@ -76,7 +76,7 @@ private func ada(name: String = "Ada", org: String = "Acme") -> ContactRecord {
         .importContacts()
         let id = try #require(try await store.person(matching: .contact, value: "C1")).id
         let r = try await ContactsImporter(
-            store: store, source: InMemoryContactsSource(records: [ada(name: "Augusta")])
+            store: store, source: InMemoryContactsSource(records: [ada(name: "Augusta")]), normalization: us
         ).importContacts()
         #expect(r.updated == 1 && r.created == 0)
         #expect(try await store.allPeople().count == 1)
@@ -86,7 +86,8 @@ private func ada(name: String = "Ada", org: String = "Acme") -> ContactRecord {
     @Test func namelessContactSkipped() async throws {
         let store = FakePeopleStore()
         let r = try await ContactsImporter(
-            store: store, source: InMemoryContactsSource(records: [ContactRecord(identifier: "X")])
+            store: store, source: InMemoryContactsSource(records: [ContactRecord(identifier: "X")]),
+            normalization: us
         ).importContacts()
         #expect(r.skipped == 1)
         #expect(try await store.allPeople().isEmpty)
