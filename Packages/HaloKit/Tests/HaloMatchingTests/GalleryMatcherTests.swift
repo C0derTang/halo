@@ -56,8 +56,10 @@ private let policy = MatchPolicy.conservative
 
     @Test func belowThresholdIsUnknown() {
         let matcher = makeMatcher([embedding(alice, planar(0)), embedding(bob, planar(180))])
-        // cos(60°) = 0.5 < 0.55, and far from bob: clear margin, but still not similar enough.
-        #expect(matcher.match(planar(60), policy: policy) == .unknown)
+        // Probe sits just below the policy threshold (and far from bob): clear margin, but still not
+        // similar enough. Derived from the policy so recalibration can't silently invalidate it.
+        let belowDegrees = acos(policy.minSimilarity - 0.05) * 180 / .pi
+        #expect(matcher.match(planar(belowDegrees), policy: policy) == .unknown)
     }
 
     @Test func atThresholdIsKnown() {

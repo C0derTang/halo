@@ -189,8 +189,12 @@ public struct MatchPolicy: Hashable, Codable, Sendable {
         self.minVotes = minVotes
     }
 
-    /// Conservative defaults; recalibrated per model in docs/MODELS.md.
-    public static let conservative = MatchPolicy(minSimilarity: 0.55, minMargin: 0.08, minVotes: 3)
+    /// Production policy for `insightface-w600k_mbf-buffalo_sc-v0.7`, calibrated with `halo-calibrate`
+    /// on LFW (see docs/MODELS.md): pair FAR 0.0018% / FRR 1.28% at 0.32; per-frame wrong-name rate
+    /// <= 0.085% and recall 96-100% across 1/3/5 enrollments x 10/50/200-person galleries.
+    /// minVotes stays 3 (the tool's tie-break suggests 4; rates were identical, 3 has lower latency).
+    /// Re-run calibration whenever the model, alignment or preprocessing changes.
+    public static let conservative = MatchPolicy(minSimilarity: 0.32, minMargin: 0.20, minVotes: 3)
 }
 
 // MARK: - Interactions (iMessage bridge, later other sources)
