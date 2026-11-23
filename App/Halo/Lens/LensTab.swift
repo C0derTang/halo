@@ -13,7 +13,8 @@ struct LensTab: View {
                 model: model, session: session,
                 momentsAllowed: environment.momentsAllowed,
                 makeMomentsModel: { environment.makeMomentsModel() },
-                onMomentOpenChange: { environment.momentSheetChanged(isOpen: $0) },
+                onMomentOpened: { environment.momentSheetOpened($0) },
+                onMomentClosed: { environment.momentSheetClosed() },
                 onAppear: { await environment.lensAppeared() },
                 onDisappear: { environment.lensDisappeared() }
             )

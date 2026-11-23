@@ -111,6 +111,8 @@ public final class AppEnvironment {
     @ObservationIgnored var isWhisperAudioActive = false
     /// A Moment sheet is open: Whisper pauses (dictation owns the audio session).
     @ObservationIgnored var isMomentOpen = false
+    /// The open Moment's model: its dictation is stopped before Whisper's session comes back.
+    @ObservationIgnored var openMoment: MomentsModel?
     /// What Whisper was last fed (labeled people + states) and when; rect-only moves are skipped.
     @ObservationIgnored var lastWhisperFeed: (signature: Set<WhisperFeedKey>, at: Date)?
 
@@ -356,6 +358,9 @@ public final class AppEnvironment {
                 }
             }
         case .active:
+            // The lock may have engaged just now (timeout): nothing runs behind the cover, not
+            // even until the lock observer's hop.
+            if appLock.isLocked { stopLens() }
             openStoreIfNeeded()
             if appLock.shouldAutoPrompt {
                 let lock = appLock

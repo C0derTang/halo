@@ -219,27 +219,68 @@ extension AppEnvironment {
         refeedWhisper()
     }
 
-    /// A Moment sheet opened or closed. While open, Whisper is paused (speech cancelled, session
-    /// released: dictation switches the shared session to `.record`). On close the dictation
-    /// session has restored and deactivated the category, so ours is set up again from scratch.
-    public func momentSheetChanged(isOpen: Bool) {
-        guard isOpen != isMomentOpen else { return }
-        isMomentOpen = isOpen
-        if isOpen {
-            whisper.cancelSpeech()
-            syncWhisperAudio()
-        } else {
-            isWhisperAudioActive = false
-            syncWhisperAudio()
-            refeedWhisper()
+    /// After a Moment closes, Whisper's session is set up once more after this delay: dictation's
+    /// teardown (restore the category, deactivate the shared session) may land after the close.
+    static let momentAudioResyncDelay: Duration = .milliseconds(300)
+
+    /// A Moment sheet opened for `model`. Whisper is paused while it is open (speech cancelled,
+    /// session released: dictation switches the shared session to `.record`).
+    public func momentSheetOpened(_ model: MomentsModel) {
+        openMoment = model
+        guard !isMomentOpen else { return }
+        isMomentOpen = true
+        whisper.cancelSpeech()
+        syncWhisperAudio()
+    }
+
+    /// The Moment sheet closed (Done, swipe-down, lock). Dictation is stopped FIRST, then Whisper's
+    /// `.playback` + `.mixWithOthers` session is set up again from scratch, and once more after
+    /// `momentAudioResyncDelay` in case dictation's teardown deactivated the session after that.
+    public func momentSheetClosed() {
+        openMoment?.stopDictation()
+        openMoment = nil
+        guard isMomentOpen else { return }
+        isMomentOpen = false
+        resyncWhisperAudioFromScratch()
+        refeedWhisper()
+        let delay = Self.momentAudioResyncDelay
+        Task { [weak self] in
+            try? await Task.sleep(for: delay)
+            guard let self, !self.isMomentOpen else { return }
+            self.resyncWhisperAudioFromScratch()
         }
+    }
+
+    /// Forgets what we believe about the shared session and applies the current rule again.
+    private func resyncWhisperAudioFromScratch() {
+        isWhisperAudioActive = false
+        syncWhisperAudio()
     }
 
     /// `AVAudioSession.routeChangeNotification`. Forwarded only while Whisper may run, so a route
     /// change with Whisper off (new AirPods, dictation's `.record`) never asks about a device.
+    /// Safety net while it may not run (e.g. the hop between a lock and the lens stopping): any
+    /// speech still playing is cancelled if the new route is not private. No question is asked.
     func whisperRouteChanged() {
-        guard whisperMayRun else { return }
+        guard whisperMayRun else {
+            if !whisperRouteIsPrivate { whisper.cancelSpeech() }
+            return
+        }
         whisper.routeDidChange()
+    }
+
+    /// Every output is wired headphones or a Bluetooth device the user confirmed. Read-only: never
+    /// sets the announcer's pending device.
+    var whisperRouteIsPrivate: Bool {
+        let outputs = whisperComponents.route.outputs
+        guard !outputs.isEmpty else { return false }
+        return outputs.allSatisfy { output in
+            switch output.kind {
+            case .wiredHeadphones: true
+            case .bluetooth: whisperComponents.devices.isTrusted(output.portUID)
+            case .other: false
+            }
+        }
     }
 
     /// The audio session is active exactly while Whisper may run. When it may not, any pending

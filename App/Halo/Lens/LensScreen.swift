@@ -19,8 +19,10 @@ struct LensScreen: View {
     /// Builds the Moments model for the people on screen at tap time
     /// (`AppEnvironment.makeMomentsModel()`).
     let makeMomentsModel: @MainActor () -> MomentsModel
-    /// The sheet opened / closed (`AppEnvironment.momentSheetChanged`): Whisper pauses meanwhile.
-    let onMomentOpenChange: @MainActor (Bool) -> Void
+    /// The sheet opened for a model (`AppEnvironment.momentSheetOpened`): Whisper pauses.
+    let onMomentOpened: @MainActor (MomentsModel) -> Void
+    /// The sheet closed (`AppEnvironment.momentSheetClosed`): dictation stops, then Whisper resumes.
+    let onMomentClosed: @MainActor () -> Void
     /// Starts the session through the environment, so backgrounding and the kill switch know the
     /// lens is on screen (`AppEnvironment.lensAppeared`).
     let onAppear: () async -> Void
@@ -49,8 +51,9 @@ struct LensScreen: View {
             .onChange(of: momentsAllowed) { _, allowed in
                 if !allowed { moment = nil }
             }
+            // Done, swipe-down and lock all end here.
             .onChange(of: moment == nil) { _, closed in
-                onMomentOpenChange(!closed)
+                if closed { onMomentClosed() }
             }
             .task { await onAppear() }
             .onDisappear { onDisappear() }
@@ -83,7 +86,9 @@ struct LensScreen: View {
     /// person is recognized.
     private var momentButton: some View {
         Button {
-            moment = MomentPresentation(model: makeMomentsModel())
+            let presentation = MomentPresentation(model: makeMomentsModel())
+            onMomentOpened(presentation.model)
+            moment = presentation
         } label: {
             Label("Moment", systemImage: "square.and.pencil")
         }

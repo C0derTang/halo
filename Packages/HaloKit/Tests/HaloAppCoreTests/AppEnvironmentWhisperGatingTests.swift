@@ -58,7 +58,7 @@ import Testing
         let stops = whisper.speech.stops
         #expect(whisper.audio.activations == 1)
 
-        h.environment.momentSheetChanged(isOpen: true)
+        h.environment.momentSheetOpened(h.environment.makeMomentsModel())
         #expect(!h.environment.whisperMayRun)
         #expect(whisper.speech.stops > stops)
         #expect(!whisper.audio.isActive)
@@ -71,7 +71,7 @@ import Testing
         whisper.route.set([EnvRoute.wired])
 
         // Closed: our `.playback` + `.mixWithOthers` session is set up again.
-        h.environment.momentSheetChanged(isOpen: false)
+        h.environment.momentSheetClosed()
         #expect(whisper.audio.activations == 2)
         #expect(whisper.audio.events.last == .activate(.whisper))
         #expect(h.environment.isWhisperAudioActive)
