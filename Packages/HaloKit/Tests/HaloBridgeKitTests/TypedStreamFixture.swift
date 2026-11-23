@@ -61,6 +61,12 @@ struct TypedStreamWriter {
 
     mutating func endObject() { bytes.append(0x86) }
 
+    /// Appends raw bytes (for hand-built streams that track table indices themselves).
+    mutating func raw(_ b: [UInt8]) { bytes += b }
+
+    /// A back-reference to table/string slot `index`.
+    mutating func ref(_ index: Int) { int(index - 110) }
+
     /// An `@` group holding an `NSString` (or `NSMutableString`) object.
     mutating func stringObject(_ text: String, mutable: Bool = false) {
         sharedString("@")

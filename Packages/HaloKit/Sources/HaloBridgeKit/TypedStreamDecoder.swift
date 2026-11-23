@@ -52,7 +52,9 @@ struct TypedStreamReader {
     enum Entry {
         /// An object whose class chain is still being read, or that is not a string.
         case object
-        case classDef(name: [UInt8], superclass: Int?)
+        /// `isString` is resolved once, when the class is defined (its own name, or a string
+        /// superclass), so per-object lookups are O(1) however long a crafted chain is.
+        case classDef(isString: Bool)
     }
 
     let bytes: [UInt8]
@@ -167,7 +169,8 @@ struct TypedStreamReader {
             guard let name = try readSharedString() else { throw Malformed() }
             _ = try readInt()  // class version
             let superclass = try readClass()
-            table[index] = .classDef(name: name, superclass: superclass)
+            table[index] = .classDef(
+                isString: Self.stringClassNames.contains(name) || isStringClass(superclass))
             return index
         case Tag.null:
             pos += 1
@@ -181,16 +184,10 @@ struct TypedStreamReader {
 
     static let stringClassNames: Set<[UInt8]> = [Array("NSString".utf8), Array("NSMutableString".utf8)]
 
+    /// O(1): `index` is nil or a `.classDef` (enforced by `readClass`).
     func isStringClass(_ index: Int?) -> Bool {
-        var current = index
-        var steps = 0
-        while let i = current, steps < table.count {
-            guard case .classDef(let name, let superclass) = table[i] else { return false }
-            if Self.stringClassNames.contains(name) { return true }
-            current = superclass
-            steps += 1
-        }
-        return false
+        guard let index, case .classDef(let isString) = table[index] else { return false }
+        return isString
     }
 
     /// An object value: new (class chain + groups until end-of-object), nil, or a back-reference.

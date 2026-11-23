@@ -56,25 +56,28 @@ public struct DigestBuilder: Sendable {
         return InteractionDigest(generatedAt: now, entries: entries)
     }
 
-    /// Bounded excerpts per normalized handle. Input is in chat.db `ROWID` order; reversing before
-    /// the stable date sort puts the later row first when two messages share a timestamp.
+    /// Bounded excerpts per normalized handle. Input is in chat.db `ROWID` order, so ordering by
+    /// (date desc, input index desc) puts the later row first when two messages share a timestamp.
     func recentMessages(_ excerpts: [MessageExcerpt], windowStart: Date, now: Date)
         -> [String: [InteractionDigest.DigestMessage]]
     {
-        var byHandle: [String: [MessageExcerpt]] = [:]
-        for e in excerpts where e.date >= windowStart && e.date <= now {
-            byHandle[normalizer.normalize(e.handle), default: []].append(e)
+        var byHandle: [String: [(index: Int, excerpt: MessageExcerpt)]] = [:]
+        for (index, e) in excerpts.enumerated() where e.date >= windowStart && e.date <= now {
+            byHandle[normalizer.normalize(e.handle), default: []].append((index, e))
         }
         return byHandle.mapValues { list in
             Array(
-                list.reversed().sorted { $0.date > $1.date }
-                    .lazy
-                    .compactMap { e in
-                        MessageExcerptPolicy.excerptText(e.text).map {
-                            InteractionDigest.DigestMessage(date: e.date, fromMe: e.isFromMe, text: $0)
-                        }
+                list.sorted { a, b in
+                    a.excerpt.date != b.excerpt.date ? a.excerpt.date > b.excerpt.date : a.index > b.index
+                }
+                .lazy
+                .compactMap { item in
+                    let e = item.excerpt
+                    return MessageExcerptPolicy.excerptText(e.text).map {
+                        InteractionDigest.DigestMessage(date: e.date, fromMe: e.isFromMe, text: $0)
                     }
-                    .prefix(MessageExcerptPolicy.maxPerHandle))
+                }
+                .prefix(MessageExcerptPolicy.maxPerHandle))
         }
     }
 }

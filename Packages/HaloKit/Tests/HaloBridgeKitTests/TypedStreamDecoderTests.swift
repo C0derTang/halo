@@ -205,6 +205,50 @@ import Testing
         #expect(decode(bytes) == "deep")
     }
 
+    /// A long non-string class chain (each class subclassing the previous one by reference) and many
+    /// objects of its deepest class must not cost O(objects x chain): class string-ness is resolved
+    /// once per class definition.
+    @Test func longClassChainWithManyObjectsDecodesQuickly() {
+        let chainLength = 20_000
+        let objectCount = 20_000
+        var w = TypedStreamWriter()  // header only; tables tracked by hand below
+        // strings: 0 "@", 1 "C", 2 "NSString", 3 "+"
+        w.raw([0x84, 0x01, 0x40])  // type "@"
+        w.raw([0x84, 0x84])  // object 0, class 1
+        w.raw([0x84, 0x01, 0x43, 0x00, 0x85])  // name "C", version 0, no superclass
+        w.raw([0x86])
+        var table = 2
+        var lastClass = 1
+        for _ in 1..<chainLength {
+            w.ref(0)  // "@"
+            w.raw([0x84, 0x84])  // new object, new class
+            let cls = table + 1
+            table += 2
+            w.ref(1)  // name "C"
+            w.int(0)
+            w.ref(lastClass)  // superclass: the previous class
+            w.raw([0x86])
+            lastClass = cls
+        }
+        for _ in 0..<objectCount {
+            w.ref(0)
+            w.raw([0x84])  // new object of the deepest (non-string) class
+            table += 1
+            w.ref(lastClass)
+            w.raw([0x86])
+        }
+        // Finally a real string object, so the whole stream must be walked to succeed.
+        w.ref(0)
+        w.raw([0x84, 0x84, 0x84, 0x08] + Array("NSString".utf8) + [0x01, 0x85])
+        w.raw([0x84, 0x01, 0x2B, 0x02] + Array("ok".utf8) + [0x86])
+
+        let clock = ContinuousClock()
+        var result: String?
+        let elapsed = clock.measure { result = decode(w.bytes) }
+        #expect(result == "ok")
+        #expect(elapsed < .seconds(5), "took \(elapsed)")
+    }
+
     static func indexAfter(_ needle: [UInt8], in haystack: [UInt8]) -> Int {
         for start in 0...(haystack.count - needle.count)
         where Array(haystack[start..<(start + needle.count)]) == needle {
