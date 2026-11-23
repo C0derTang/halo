@@ -43,11 +43,15 @@ public final class LensScreenModel {
     public var showsMetrics = false
     /// Latest pipeline numbers, refreshed by `refreshMetrics()` while the debug overlay is shown.
     public private(set) var metrics: LensMetrics?
+    /// Called on the main actor whenever `items` changes (Whisper is fed from here).
+    @ObservationIgnored public var onItemsChange: (@MainActor ([LensOverlayItem]) -> Void)?
 
     private let source: any LensTrackSource
     private let camera: any CameraControlling
     private let store: any PeopleStoring & PrivacyStoring
     private let ranker: any LabelRanking
+    /// The person's unexpired memory hooks, passed to the ranker.
+    private let hooks: @Sendable (PersonID, Date) async -> [MemoryHook]
     private let now: @Sendable () -> Date
     private let frameBox = LensFrameRecorder()
 
@@ -71,19 +75,22 @@ public final class LensScreenModel {
     public convenience init(
         pipeline: LensPipeline, camera: any CameraControlling, store: any PeopleStoring & PrivacyStoring,
         ranker: any LabelRanking = MinimalLabelRanker(), recognitionAvailable: Bool = true,
+        hooks: @escaping @Sendable (PersonID, Date) async -> [MemoryHook] = { _, _ in [] },
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.init(
             source: pipeline, camera: camera, store: store, ranker: ranker,
-            recognitionAvailable: recognitionAvailable, now: now)
+            recognitionAvailable: recognitionAvailable, hooks: hooks, now: now)
     }
 
     public init(
         source: any LensTrackSource, camera: any CameraControlling, store: any PeopleStoring & PrivacyStoring,
         ranker: any LabelRanking = MinimalLabelRanker(), recognitionAvailable: Bool = true,
+        hooks: @escaping @Sendable (PersonID, Date) async -> [MemoryHook] = { _, _ in [] },
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.source = source
+        self.hooks = hooks
         self.camera = camera
         self.store = store
         self.ranker = ranker
@@ -134,6 +141,7 @@ public final class LensScreenModel {
         latestTracks = []
         items = []
         loggedThisSession = []
+        onItemsChange?([])
     }
 
     /// The people graph or digest changed (digest import, edit, forget): rebuild the labels of the
@@ -202,7 +210,9 @@ public final class LensScreenModel {
                 trackID: track.trackID, rect: track.smoothedBox, state: Self.hologramState(track.state),
                 label: Self.knownPerson(track).flatMap { labels[$0] })
         }
-        if next != items { items = next }
+        guard next != items else { return }
+        items = next
+        onItemsChange?(next)
     }
 
     /// The person a track is recognized as, only when its stable identity is `.known`.
@@ -245,9 +255,11 @@ public final class LensScreenModel {
         loading.insert(person)
         let store = self.store
         let ranker = self.ranker
+        let hooks = self.hooks
         let now = self.now
         spawn { [weak self] in
-            let label = await Self.buildLabel(for: person, store: store, ranker: ranker, now: now)
+            let label = await Self.buildLabel(
+                for: person, store: store, ranker: ranker, hooks: hooks, now: now)
             self?.finishLoad(person, label: label, generation: generation)
         }
     }
@@ -266,10 +278,10 @@ public final class LensScreenModel {
     }
 
     /// Builds the label off the main actor. Nil for a missing or unconfirmed person, or when the
-    /// store fails. A digest read failure only drops the digest-derived chips.
+    /// store fails. A digest / hook read failure only drops the chips derived from it.
     nonisolated private static func buildLabel(
         for id: PersonID, store: any PeopleStoring & PrivacyStoring, ranker: any LabelRanking,
-        now: @Sendable () -> Date
+        hooks: @Sendable (PersonID, Date) async -> [MemoryHook], now: @Sendable () -> Date
     ) async -> LabelData? {
         do {
             guard let person = try await store.person(id), person.confirmed, person.id == id else {
@@ -277,7 +289,10 @@ public final class LensScreenModel {
             }
             let identities = try await store.identities(for: id)
             let digest = try? await store.latestDigest()
-            return ranker.label(for: person, identities: identities, digest: digest, now: now())
+            let date = now()
+            let personHooks = await hooks(id, date)
+            return ranker.label(
+                for: person, identities: identities, digest: digest, hooks: personHooks, now: date)
         } catch {
             return nil
         }

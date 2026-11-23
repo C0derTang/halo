@@ -41,6 +41,10 @@ final class EnvRecordingStore: AppStoring {
     let forgetGate = Mutex<EnvGate?>(nil)
     /// When set, `saveDigest` parks on it before touching the store (an import "in flight").
     let saveDigestGate = Mutex<EnvGate?>(nil)
+    /// When set, `eraseEverything` throws without erasing anything.
+    let failErase = Mutex(false)
+    /// When set, `scanCursor` parks on it AFTER reading the cursor (a read "in flight").
+    let scanCursorGate = Mutex<EnvGate?>(nil)
 
     init(log: EnvEventLog) throws {
         base = try PeopleStore.inMemory()
@@ -93,7 +97,14 @@ final class EnvRecordingStore: AppStoring {
     }
     func deleteEmbeddings(ids: [UUID]) async throws { try await base.deleteEmbeddings(ids: ids) }
     func removeIdentity(_ identity: Identity) async throws { try await base.removeIdentity(identity) }
-    func scanCursor() async throws -> String? { try await base.scanCursor() }
+    func scanCursor() async throws -> String? {
+        let cursor = try await base.scanCursor()
+        if let gate = scanCursorGate.withLock({ $0 }) {
+            log.record("store.scanCursor.parked")
+            await gate.wait()
+        }
+        return cursor
+    }
     func setScanCursor(_ cursor: String?) async throws { try await base.setScanCursor(cursor) }
 
     func logRecognition(of id: PersonID, at date: Date) async throws {
@@ -107,8 +118,24 @@ final class EnvRecordingStore: AppStoring {
     }
     func eraseEverything() async throws {
         log.record("store.erase")
+        if failErase.withLock({ $0 }) { throw EnvStoreFailure() }
         try await base.eraseEverything()
     }
+
+    func hooks(for person: PersonID, now: Date) async throws -> [MemoryHook] {
+        try await base.hooks(for: person, now: now)
+    }
+    func addHook(_ hook: MemoryHook) async throws {
+        log.record("store.addHook")
+        try await base.addHook(hook)
+    }
+    func replaceHooks(for person: PersonID, source: MemoryHook.Source, with hooks: [MemoryHook])
+        async throws
+    {
+        log.record("store.replaceHooks")
+        try await base.replaceHooks(for: person, source: source, with: hooks)
+    }
+    func deleteHook(id: UUID) async throws { try await base.deleteHook(id: id) }
 
     /// A confirmed person with one embedding.
     @discardableResult
@@ -308,9 +335,11 @@ struct EnvHarness {
         blockingContacts: Bool = false,
         openStore: (@Sendable () throws -> any AppStoring)? = nil, embedderGate: EnvGate? = nil,
         cameraStartGate: EnvGate? = nil, permissions: [OnboardingPermission: PermissionStatus] = [:],
-        onboardingCompleted: Bool = false
+        onboardingCompleted: Bool = false, lockTimeout: TimeInterval = 30,
+        hookGenerator: any MemoryHookGenerating = UnavailableHookGenerator(),
+        whisper: EnvWhisper? = nil, log: EnvEventLog = EnvEventLog(),
+        authenticator: any Authenticating = EnvFakeAuthenticator()
     ) throws {
-        let log = EnvEventLog()
         let store = try EnvRecordingStore(log: log)
         let embedder = EnvFakeEmbedder()
         let keyStore = MemoryKeyStore()
@@ -330,13 +359,17 @@ struct EnvHarness {
                 ? EnvBlockingContacts(log: log) as any ContactsSource
                 : InMemoryContactsSource(records: contacts),
             thumbnails: EnvNoThumbnails(),
-            authenticator: EnvFakeAuthenticator(),
+            authenticator: authenticator,
             keyStore: keyStore,
             permissions: permissionFake,
             onboarding: onboarding,
             region: region,
+            lockTimeout: lockTimeout,
             galleryDebounce: .milliseconds(1),
-            makeCamera: { EnvFakeCamera(log: log, startGate: cameraStartGate) })
+            makeCamera: { EnvFakeCamera(log: log, startGate: cameraStartGate) },
+            hookGenerator: hookGenerator,
+            memoryRefreshInterval: 0,
+            makeWhisper: { whisper?.components ?? .silent() })
         environment = AppEnvironment(dependencies: dependencies)
         self.store = store
         self.log = log

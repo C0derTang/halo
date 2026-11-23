@@ -30,13 +30,20 @@ struct PeopleTab: View {
 
 /// Owns one `PersonDetailModel` for the pushed person.
 private struct PersonDetailScreen: View {
+    let environment: AppEnvironment
     @State private var model: PersonDetailModel
 
     init(environment: AppEnvironment, personID: PersonID) {
+        self.environment = environment
         _model = State(initialValue: environment.makePersonDetailModel(for: personID))
     }
 
     var body: some View {
         PersonDetailView(model: model)
+            // Edits, imports and memory hook changes (refresh, Moments): rebuild the label preview.
+            .onChange(of: environment.peopleRevision) {
+                guard !model.didForget else { return }
+                Task { await model.load() }
+            }
     }
 }

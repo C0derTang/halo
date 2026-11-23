@@ -3,7 +3,7 @@ import HaloCore
 import Synchronization
 
 /// Every store protocol the app uses. Implemented by HaloStore's `PeopleStore`.
-public typealias AppStoring = PeopleStoring & EnrollmentStoring & PrivacyStoring
+public typealias AppStoring = PeopleStoring & EnrollmentStoring & PrivacyStoring & MemoryStoring
 
 public enum AppStoreError: Error, Equatable, Sendable {
     /// The encrypted store could not be opened yet (e.g. the app was pre-warmed before the first
@@ -98,6 +98,19 @@ final class LazyStore: AppStoring {
         return await store.flushPendingErasure()
     }
     func eraseEverything() async throws { try await base().eraseEverything() }
+
+    // MARK: MemoryStoring
+
+    func hooks(for person: PersonID, now: Date) async throws -> [MemoryHook] {
+        try await base().hooks(for: person, now: now)
+    }
+    func addHook(_ hook: MemoryHook) async throws { try await base().addHook(hook) }
+    func replaceHooks(for person: PersonID, source: MemoryHook.Source, with hooks: [MemoryHook])
+        async throws
+    {
+        try await base().replaceHooks(for: person, source: source, with: hooks)
+    }
+    func deleteHook(id: UUID) async throws { try await base().deleteHook(id: id) }
 }
 
 /// Receives the store's identity-change and destructive-operation events. Implemented by
@@ -112,6 +125,8 @@ protocol ObservedStoreDelegate: AnyObject, Sendable {
     func storeDidEraseEverything(succeeded: Bool) async
     /// Something that can change the gallery or a label changed (debounced refresh).
     func storeDidChangeIdentities() async
+    /// A memory hook was added, replaced or deleted: labels showing hook chips are stale.
+    func storeDidChangeHooks() async
 }
 
 /// The store every screen gets. Forwards to `LazyStore`, but routes the destructive operations
@@ -123,6 +138,7 @@ protocol ObservedStoreDelegate: AnyObject, Sendable {
 ///   deleteEmbeddings, eraseEverything, digest import, upsert, identity and embedding writes)
 ///   triggers a gallery rebuild + `LensPipeline.setMatcher`, so a stale matcher never outlives an
 ///   identity change.
+/// - Memory hook writes (Moments, notes) rebuild the on-screen labels; they never touch the gallery.
 ///
 /// Because this is the only store handed to screens, no screen can bypass the ordering.
 public final class ObservedStore: AppStoring {
@@ -244,5 +260,33 @@ public final class ObservedStore: AppStoring {
             throw error
         }
         await delegate?.storeDidEraseEverything(succeeded: true)
+    }
+
+    // MARK: MemoryStoring
+
+    public func hooks(for person: PersonID, now: Date) async throws -> [MemoryHook] {
+        try await base.hooks(for: person, now: now)
+    }
+    public func addHook(_ hook: MemoryHook) async throws {
+        try await changingHooks { try await base.addHook(hook) }
+    }
+    public func replaceHooks(for person: PersonID, source: MemoryHook.Source, with hooks: [MemoryHook])
+        async throws
+    {
+        try await changingHooks { try await base.replaceHooks(for: person, source: source, with: hooks) }
+    }
+    public func deleteHook(id: UUID) async throws {
+        try await changingHooks { try await base.deleteHook(id: id) }
+    }
+
+    /// Runs a hook write, then reports a hook change whether or not it threw.
+    private func changingHooks(_ body: () async throws -> Void) async throws {
+        do {
+            try await body()
+        } catch {
+            await delegate?.storeDidChangeHooks()
+            throw error
+        }
+        await delegate?.storeDidChangeHooks()
     }
 }

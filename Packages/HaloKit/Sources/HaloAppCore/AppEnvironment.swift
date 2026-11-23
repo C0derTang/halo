@@ -6,6 +6,7 @@ import HaloImport
 import HaloLabels
 import HaloLens
 import HaloMatching
+import HaloMemory
 import HaloUI
 import HaloVision
 import Observation
@@ -35,8 +36,15 @@ import SwiftUI
 /// - **Missing model is not a crash.** `recognition == .unavailable`: no lens pipeline, no photo
 ///   scan; the rest of the app works.
 /// - **One handle normalizer and one ranker** (device region, unknown -> "ZZ", never a guessed "US")
-///   shared by the contacts importer, the digest importer, the handle resolver, the People screens
-///   and the label ranker the lens and the person detail screen both use.
+///   shared by the contacts importer, the digest importer, the handle resolver, the People screens,
+///   the memory hook refresher and the label ranker the lens and the person detail screen both use.
+/// - **Memory hooks** (`AppEnvironmentMemory.swift`): the refresher is a writer like the imports:
+///   off the main actor, never during a forget / erase, cancelled and awaited by both. Labels on the
+///   lens and the detail screen include the person's hooks and rebuild when hooks change.
+/// - **Whisper** (`AppEnvironmentWhisper.swift`): fed by the lens's overlay updates, only while
+///   enabled, the lens runs, the app is unlocked and in the foreground; every lens stop (tab, lock,
+///   background, kill switch) cancels speech and releases the `.playback` + `.mixWithOthers` audio
+///   session.
 @MainActor @Observable
 public final class AppEnvironment {
     public enum RecognitionStatus: Hashable, Sendable {
@@ -85,9 +93,22 @@ public final class AppEnvironment {
     /// Number of people the lens can currently recognize.
     public private(set) var galleryPersonCount = 0
     /// Bumped after every identity change; screens that cache labels re-read on change.
-    public private(set) var peopleRevision = 0
+    public internal(set) var peopleRevision = 0
     /// Bumped when every screen must rebuild from scratch (kill switch, store opened late).
     public private(set) var resetGeneration = 0
+
+    // MARK: Whisper
+
+    /// Announces recognized people through private headphones. Observe `pendingDeviceConfirmation`
+    /// for the Bluetooth prompt; answer through `confirmWhisperDevice(_:)`.
+    public let whisper: WhisperAnnouncer
+    /// The Whisper toggles (off by default). Change them through `setWhisperSettings(_:)`.
+    public internal(set) var whisperSettings: WhisperSettings
+    @ObservationIgnored let whisperComponents: WhisperComponents
+    /// Forwards audio route changes to `whisper` for the app's lifetime.
+    @ObservationIgnored private var whisperRouteObserver: WhisperRouteObserver?
+    /// The `.playback` + `.mixWithOthers` session is active (only while Whisper may run).
+    @ObservationIgnored var isWhisperAudioActive = false
 
     /// The matcher most recently handed to the lens (tests).
     @ObservationIgnored private(set) var activeGallery: GalleryMatcher?
@@ -104,7 +125,7 @@ public final class AppEnvironment {
     /// is running.
     @ObservationIgnored private(set) var destructiveOperations = 0
     /// The kill switch is running: the lens does not (re)start.
-    @ObservationIgnored private var isErasing = false
+    @ObservationIgnored private(set) var isErasing = false
     /// Imports parked until the running forget / erase has finished.
     @ObservationIgnored private var destructiveWaiters: [CheckedContinuation<Void, Never>] = []
     /// Running contacts import (onboarding or Settings). Owned here so forget / erase can stop it.
@@ -114,9 +135,16 @@ public final class AppEnvironment {
     @ObservationIgnored var digestTask: Task<Void, Never>?
     /// Tail of the queue of requested digest imports (they run one at a time, in order).
     @ObservationIgnored var digestQueue: Task<Bool, Never>?
-    /// Bumped by every kill switch. An import requested before an erase that has not started
-    /// writing when the erase begins is dropped, never run afterwards.
+    /// Bumped by every kill switch that SUCCEEDED (before waiting imports may resume). An import
+    /// or scan resume requested before it is dropped, never run afterwards; a failed erase drops
+    /// nothing.
     @ObservationIgnored private(set) var eraseGeneration = 0
+    /// Writes on-device memory hooks from the latest digest. A writer: see `AppEnvironmentMemory`.
+    @ObservationIgnored let memoryRefresher: MemoryHookRefresher
+    /// The refresh pass currently running (at most one).
+    @ObservationIgnored var memoryTask: Task<Void, Never>?
+    @ObservationIgnored var memoryRefreshPending = false
+    @ObservationIgnored var memoryRunID = 0
     /// Lens label source with a cached store-wide identity set, invalidated on identity changes.
     @ObservationIgnored let lensLabels: LensLabelStore
     /// Progress subscribers (onboarding). Finished when the scan is over (not when it pauses).
@@ -156,6 +184,22 @@ public final class AppEnvironment {
 
         camera = dependencies.makeCamera()
         lensLabels = LensLabelStore(base: store)
+        // Writes straight to the store (not through `store`): one label rebuild per pass instead of
+        // one per person; forget / erase stop it explicitly.
+        memoryRefresher = MemoryHookRefresher(
+            store: lazyStore, generator: dependencies.hookGenerator,
+            minimumInterval: dependencies.memoryRefreshInterval,
+            normalizeHandle: { normalizer.normalize($0) })
+
+        let whisperComponents = dependencies.makeWhisper()
+        self.whisperComponents = whisperComponents
+        let settings = whisperComponents.settings.load()
+        whisperSettings = settings
+        let whisper = WhisperAnnouncer(
+            settings: settings, route: whisperComponents.route, devices: whisperComponents.devices,
+            speech: whisperComponents.speech, haptics: whisperComponents.haptics)
+        self.whisper = whisper
+        whisperRouteObserver = WhisperRouteObserver { [weak whisper] in whisper?.routeDidChange() }
 
         isStoreAvailable = lazyStore.openIfNeeded()
         store.setDelegate(self)
@@ -250,12 +294,15 @@ public final class AppEnvironment {
     }
 
     /// The lens screen model over `camera`. Labels come from the shared ranker with store-wide
-    /// identities (`LensLabelStore`), the same as the person detail screen.
+    /// identities (`LensLabelStore`) and the person's memory hooks, the same as the person detail
+    /// screen. Its overlay updates feed Whisper.
     private func makeLens(source: any LensTrackSource, recognitionAvailable: Bool) -> LensScreenModel? {
         guard let camera else { return nil }
-        return LensScreenModel(
+        let model = LensScreenModel(
             source: source, camera: camera, store: lensLabels, ranker: labelRanker,
-            recognitionAvailable: recognitionAvailable)
+            recognitionAvailable: recognitionAvailable, hooks: Self.hookReader(store))
+        model.onItemsChange = { [weak self] items in self?.lensItemsChanged(items) }
+        return model
     }
 
     private func galleryApplied(_ matcher: GalleryMatcher) {
@@ -317,6 +364,8 @@ public final class AppEnvironment {
                 // Retry a rebuild that failed earlier (e.g. a read while the device was locked).
                 await refresher?.requestRefresh()
                 reconcileScan()
+                // Off the main actor; rate-limited by the refresher itself.
+                refreshMemoryHooks()
             }
         default:
             return enqueueLifecycle {}
@@ -353,11 +402,16 @@ public final class AppEnvironment {
     /// again).
     public func startLens() async {
         guard let lens, phase != .background, !isErasing, !appLock.isLocked else { return }
+        // A new lens session: everyone may be announced again.
+        if !lens.isRunning { whisper.resetSession() }
         await lens.start()
+        syncWhisperAudio()
     }
 
+    /// Stops the lens session and Whisper with it (speech cancelled, audio session released).
     public func stopLens() {
         lens?.stop()
+        stopWhisper()
     }
 
     // MARK: - Photo scan
@@ -507,7 +561,8 @@ public final class AppEnvironment {
     public func label(for person: Person, now: Date = Date()) async -> LabelData {
         let identities = (try? await storeWideIdentities()) ?? []
         let digest = (try? await store.latestDigest()) ?? nil
-        return labelRanker.label(for: person, identities: identities, digest: digest, now: now)
+        let hooks = await hooks(for: person.id, now: now)
+        return labelRanker.label(for: person, identities: identities, digest: digest, hooks: hooks, now: now)
     }
 }
 
@@ -520,6 +575,8 @@ extension AppEnvironment: ObservedStoreDelegate {
         // Drop them from the lens first: `setMatcher` clears every on-screen name at once.
         await refresher?.exclude(id)
         await pauseScan()
+        // The memory hook refresher is a writer: stop it before anything is deleted.
+        await stopMemoryRefresh()
         // Let running imports finish their writes (new ones wait for this forget).
         await stopImports(cancel: false)
         // Recognition-log writes the lens already issued land before the delete.
@@ -544,13 +601,13 @@ extension AppEnvironment: ObservedStoreDelegate {
 
     func storeWillEraseEverything() async {
         destructiveOperations += 1
-        eraseGeneration += 1
         isErasing = true
         wantsScan = false
         stopLens()
         await refresher?.reset()
         // Every writer is stopped and has finished writing before the erase.
         await pauseScan()
+        await stopMemoryRefresh()
         await stopImports(cancel: true)
         await lens?.settle()
         finishScanObservers()
@@ -561,6 +618,9 @@ extension AppEnvironment: ObservedStoreDelegate {
         wantsScan = false
         lensLabels.invalidate()
         if succeeded {
+            // Before `destructiveOperationEnded()` resumes the waiting imports: they see the bump
+            // and are dropped. A failed erase bumps nothing, so nothing is dropped.
+            eraseGeneration += 1
             excludedPeople = []
             await refresher?.reset()
             scanProgress = nil
@@ -582,5 +642,9 @@ extension AppEnvironment: ObservedStoreDelegate {
         lensLabels.invalidate()
         peopleRevision += 1
         await refresher?.requestRefresh()
+    }
+
+    func storeDidChangeHooks() async {
+        hooksDidChange()
     }
 }

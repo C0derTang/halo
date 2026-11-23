@@ -13,10 +13,16 @@ struct LensScreen: View {
     @Bindable var model: LensScreenModel
     /// The session of the app's one camera (`AppEnvironment.captureSession`).
     let session: AVCaptureSession
+    /// Confirmed people labeled on screen right now (`AppEnvironment.recognizedPeople`).
+    let recognizedPeople: [LensRecognizedPerson]
+    /// Builds the Moments sheet for those people; nil hides the "Moment" button.
+    let momentSheet: (@MainActor ([LensRecognizedPerson]) -> AnyView)?
     /// Starts the session through the environment, so backgrounding and the kill switch know the
     /// lens is on screen (`AppEnvironment.lensAppeared`).
     let onAppear: () async -> Void
     let onDisappear: () -> Void
+    /// The people a Moment was started for (captured when the button was tapped).
+    @State private var momentPeople: MomentPeople?
 
     /// Single source of truth for how the preview fits the frame; the overlay maps with the same.
     static let gravity: LensOverlayGeometry.VideoGravity = .resizeAspectFill
@@ -30,6 +36,10 @@ struct LensScreen: View {
             .background(Color.black)
             .overlay(alignment: .top) { banners }
             .overlay(alignment: .bottomTrailing) { metricsControls }
+            .overlay(alignment: .bottom) { momentButton }
+            .sheet(item: $momentPeople) { selection in
+                momentSheet?(selection.people)
+            }
             .task { await onAppear() }
             .onDisappear { onDisappear() }
             .task(id: model.showsMetrics) {
@@ -57,6 +67,21 @@ struct LensScreen: View {
         .padding(.top, 8)
     }
 
+    /// "Moment": jot a note about the people on screen. Shown only when someone is recognized.
+    @ViewBuilder
+    private var momentButton: some View {
+        if momentSheet != nil, !recognizedPeople.isEmpty {
+            Button {
+                momentPeople = MomentPeople(people: recognizedPeople)
+            } label: {
+                Label("Moment", systemImage: "square.and.pencil")
+            }
+            .buttonStyle(.borderedProminent)
+            .padding(.bottom, 24)
+            .accessibilityHint(Text("Add a note about the people in view"))
+        }
+    }
+
     private var metricsControls: some View {
         VStack(alignment: .trailing, spacing: 8) {
             if model.showsMetrics, let metrics = model.metrics {
@@ -72,6 +97,11 @@ struct LensScreen: View {
         }
         .padding()
     }
+}
+
+private struct MomentPeople: Identifiable {
+    let id = UUID()
+    let people: [LensRecognizedPerson]
 }
 
 private struct LensBanner: View {
