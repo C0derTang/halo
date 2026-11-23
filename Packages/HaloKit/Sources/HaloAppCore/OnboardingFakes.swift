@@ -6,7 +6,29 @@ public final class FakePermissionRequester: PermissionRequesting, @unchecked Sen
     private var results: [OnboardingPermission: PermissionStatus]
     private var _requested: [OnboardingPermission] = []
 
-    public init(results: [OnboardingPermission: PermissionStatus] = [:]) { self.results = results }
+    private let gated: Bool
+    private var released = false
+    private var waiter: CheckedContinuation<Void, Never>?
+    private var _waiting = false
+
+    /// `gated`: `request` suspends until `release()` is called, so tests can observe the
+    /// in-flight state deterministically.
+    public init(results: [OnboardingPermission: PermissionStatus] = [:], gated: Bool = false) {
+        self.results = results
+        self.gated = gated
+    }
+
+    /// True once a request is suspended at the gate.
+    public var isWaiting: Bool { lock.withLock { _waiting } }
+
+    public func release() {
+        let w: CheckedContinuation<Void, Never>? = lock.withLock {
+            released = true
+            defer { waiter = nil }
+            return waiter
+        }
+        w?.resume()
+    }
 
     public var requested: [OnboardingPermission] { lock.withLock { _requested } }
 
@@ -15,7 +37,18 @@ public final class FakePermissionRequester: PermissionRequesting, @unchecked Sen
     }
 
     public func request(_ permission: OnboardingPermission) async -> PermissionStatus {
-        lock.withLock {
+        if gated {
+            await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+                let resumeNow: Bool = lock.withLock {
+                    if released { return true }
+                    waiter = c
+                    _waiting = true
+                    return false
+                }
+                if resumeNow { c.resume() }
+            }
+        }
+        return lock.withLock {
             _requested.append(permission)
             return results[permission] ?? .granted
         }

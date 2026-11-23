@@ -166,12 +166,19 @@ private struct Rig {
 }
 
 @MainActor @Test func skipIgnoredWhileWorking() async {
-    let r = Rig()
-    r.model.acceptPrivacyExplanation()
-    let task = Task { await r.model.allowCurrentStep() }
-    await Task.yield()
-    r.model.skipCurrentStep()
+    let perms = FakePermissionRequester(gated: true)
+    let model = OnboardingModel(
+        permissions: perms, contacts: FakeContactsImporter(), scanner: FakePhotoScanner(),
+        store: InMemoryOnboardingStore())
+    model.acceptPrivacyExplanation()
+    let task = Task { await model.allowCurrentStep() }
+    while !perms.isWaiting { await Task.yield() }
+    #expect(model.isWorking)
+    model.skipCurrentStep()
+    #expect(model.step == .camera)
+    #expect(model.outcomes[.camera] == nil)
+    perms.release()
     await task.value
-    #expect(r.model.outcomes[.camera] == .granted)
-    #expect(r.model.step == .contacts)
+    #expect(model.outcomes[.camera] == .granted)
+    #expect(model.step == .contacts)
 }
