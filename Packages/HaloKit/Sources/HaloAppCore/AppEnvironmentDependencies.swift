@@ -51,6 +51,8 @@ public struct AppDependencies: Sendable {
     /// Builds Whisper mode's route reader, trusted-device store, speech, haptics, audio session and
     /// settings store (called once, at init). The default never speaks.
     public var makeWhisper: @MainActor @Sendable () -> WhisperComponents
+    /// Moments dictation, ON DEVICE ONLY (`OnDeviceSpeechTranscriber` in the app). nil hides it.
+    public var speechTranscriber: (any SpeechTranscribing)?
 
     public init(
         openStore: @escaping @Sendable () throws -> any AppStoring,
@@ -75,7 +77,8 @@ public struct AppDependencies: Sendable {
         },
         hookGenerator: any MemoryHookGenerating = UnavailableHookGenerator(),
         memoryRefreshInterval: TimeInterval = MemoryHookRefresher.defaultMinimumInterval,
-        makeWhisper: @escaping @MainActor @Sendable () -> WhisperComponents = { .silent() }
+        makeWhisper: @escaping @MainActor @Sendable () -> WhisperComponents = { .silent() },
+        speechTranscriber: (any SpeechTranscribing)? = nil
     ) {
         self.openStore = openStore
         self.loadEmbedder = loadEmbedder
@@ -98,6 +101,7 @@ public struct AppDependencies: Sendable {
         self.hookGenerator = hookGenerator
         self.memoryRefreshInterval = memoryRefreshInterval
         self.makeWhisper = makeWhisper
+        self.speechTranscriber = speechTranscriber
     }
 }
 
@@ -105,7 +109,7 @@ extension AppDependencies {
     /// The real services: `PeopleStore` at its default (Data Protection `.complete`) path, the
     /// bundled CoreML embedder, Vision detection, PhotoKit, Contacts, Face ID, the Keychain pairing
     /// key, the system permission prompts, the back camera, the on-device Foundation Models hook
-    /// generator and the system Whisper components.
+    /// generator, the system Whisper components and on-device Moments dictation.
     @MainActor
     public static func live() -> AppDependencies {
         AppDependencies(
@@ -128,7 +132,8 @@ extension AppDependencies {
             makeCamera: liveCamera,
             backgroundWork: LifecycleBackgroundWork.run,
             hookGenerator: liveHookGenerator(),
-            makeWhisper: { .system() })
+            makeWhisper: { .system() },
+            speechTranscriber: OnDeviceSpeechTranscriber())
     }
 
     private static func liveHookGenerator() -> any MemoryHookGenerating {

@@ -15,14 +15,17 @@ struct LensScreen: View {
     let session: AVCaptureSession
     /// Confirmed people labeled on screen right now (`AppEnvironment.recognizedPeople`).
     let recognizedPeople: [LensRecognizedPerson]
-    /// Builds the Moments sheet for those people; nil hides the "Moment" button.
-    let momentSheet: (@MainActor ([LensRecognizedPerson]) -> AnyView)?
+    /// Moments may start / stay open (`AppEnvironment.momentsAllowed`): false on lock,
+    /// background, kill switch or lens stop, which dismisses an open sheet.
+    let momentsAllowed: Bool
+    /// Builds the Moments model for the people on screen (`AppEnvironment.makeMomentsModel`).
+    let makeMomentsModel: @MainActor ([LensRecognizedPerson]) -> MomentsModel
     /// Starts the session through the environment, so backgrounding and the kill switch know the
     /// lens is on screen (`AppEnvironment.lensAppeared`).
     let onAppear: () async -> Void
     let onDisappear: () -> Void
-    /// The people a Moment was started for (captured when the button was tapped).
-    @State private var momentPeople: MomentPeople?
+    /// The open Moment, built for the people on screen when the button was tapped.
+    @State private var moment: MomentPresentation?
 
     /// Single source of truth for how the preview fits the frame; the overlay maps with the same.
     static let gravity: LensOverlayGeometry.VideoGravity = .resizeAspectFill
@@ -37,8 +40,13 @@ struct LensScreen: View {
             .overlay(alignment: .top) { banners }
             .overlay(alignment: .bottomTrailing) { metricsControls }
             .overlay(alignment: .bottom) { momentButton }
-            .sheet(item: $momentPeople) { selection in
-                momentSheet?(selection.people)
+            .sheet(item: $moment) { presentation in
+                MomentsSheet(model: presentation.model) { moment = nil }
+                    .presentationDetents([.medium, .large])
+            }
+            // Lock, background, kill switch, lens stopped: close the sheet (it stops dictation).
+            .onChange(of: momentsAllowed) { _, allowed in
+                if !allowed { moment = nil }
             }
             .task { await onAppear() }
             .onDisappear { onDisappear() }
@@ -67,19 +75,18 @@ struct LensScreen: View {
         .padding(.top, 8)
     }
 
-    /// "Moment": jot a note about the people on screen. Shown only when someone is recognized.
-    @ViewBuilder
+    /// "Moment": jot a note about the people on screen. Enabled only while at least one confirmed
+    /// person is recognized.
     private var momentButton: some View {
-        if momentSheet != nil, !recognizedPeople.isEmpty {
-            Button {
-                momentPeople = MomentPeople(people: recognizedPeople)
-            } label: {
-                Label("Moment", systemImage: "square.and.pencil")
-            }
-            .buttonStyle(.borderedProminent)
-            .padding(.bottom, 24)
-            .accessibilityHint(Text("Add a note about the people in view"))
+        Button {
+            moment = MomentPresentation(model: makeMomentsModel(recognizedPeople))
+        } label: {
+            Label("Moment", systemImage: "square.and.pencil")
         }
+        .buttonStyle(.borderedProminent)
+        .disabled(!momentsAllowed || recognizedPeople.isEmpty)
+        .padding(.bottom, 24)
+        .accessibilityHint(Text("Add a note about the people in view"))
     }
 
     private var metricsControls: some View {
@@ -99,9 +106,9 @@ struct LensScreen: View {
     }
 }
 
-private struct MomentPeople: Identifiable {
+private struct MomentPresentation: Identifiable {
     let id = UUID()
-    let people: [LensRecognizedPerson]
+    let model: MomentsModel
 }
 
 private struct LensBanner: View {

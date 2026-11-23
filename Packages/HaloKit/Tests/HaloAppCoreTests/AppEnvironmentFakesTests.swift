@@ -338,7 +338,8 @@ struct EnvHarness {
         onboardingCompleted: Bool = false, lockTimeout: TimeInterval = 30,
         hookGenerator: any MemoryHookGenerating = UnavailableHookGenerator(),
         whisper: EnvWhisper? = nil, log: EnvEventLog = EnvEventLog(),
-        authenticator: any Authenticating = EnvFakeAuthenticator()
+        authenticator: any Authenticating = EnvFakeAuthenticator(),
+        speechTranscriber: (any SpeechTranscribing)? = nil
     ) throws {
         let store = try EnvRecordingStore(log: log)
         let embedder = EnvFakeEmbedder()
@@ -369,7 +370,8 @@ struct EnvHarness {
             makeCamera: { EnvFakeCamera(log: log, startGate: cameraStartGate) },
             hookGenerator: hookGenerator,
             memoryRefreshInterval: 0,
-            makeWhisper: { whisper?.components ?? .silent() })
+            makeWhisper: { whisper?.components ?? .silent() },
+            speechTranscriber: speechTranscriber)
         environment = AppEnvironment(dependencies: dependencies)
         self.store = store
         self.log = log

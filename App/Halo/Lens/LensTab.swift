@@ -7,17 +7,13 @@ struct LensTab: View {
     let environment: AppEnvironment
     let isEnabled: Bool
 
-    /// Builds the Moments sheet for the people on screen. nil hides the "Moment" button.
-    /// TODO(#70): `{ people in AnyView(MomentsSheet(model: <MomentsModel over people + store>)) }`
-    /// once the Moments PR has merged.
-    static let momentSheet: (@MainActor (AppEnvironment, [LensRecognizedPerson]) -> AnyView)? = nil
-
     var body: some View {
         if isEnabled, let model = environment.lens, let session = environment.captureSession {
             LensScreen(
                 model: model, session: session,
                 recognizedPeople: environment.recognizedPeople,
-                momentSheet: Self.momentSheet.map { make in { people in make(environment, people) } },
+                momentsAllowed: environment.momentsAllowed,
+                makeMomentsModel: { people in environment.makeMomentsModel(for: people) },
                 onAppear: { await environment.lensAppeared() },
                 onDisappear: { environment.lensDisappeared() }
             )
