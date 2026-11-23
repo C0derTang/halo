@@ -34,7 +34,7 @@ targets:
           fi
     dependencies:
       - package: HaloKit
-        products: [HaloCore, HaloStore, HaloMatching, HaloClustering, HaloTracking, HaloVision, HaloImport, HaloLabels, HaloLens, HaloUI, HaloAppCore, HaloBridgeKit]
+        products: [HaloCore, HaloStore, HaloMatching, HaloClustering, HaloTracking, HaloVision, HaloImport, HaloLabels, HaloLens, HaloUI, HaloAppCore, HaloBridgeKit, HaloMemory]
     info:
       path: Halo/Info.plist
       properties:

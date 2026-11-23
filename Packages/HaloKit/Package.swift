@@ -17,6 +17,7 @@ let package = Package(
         .library(name: "HaloLabels", targets: ["HaloLabels"]),
         .library(name: "HaloLens", targets: ["HaloLens"]),
         .library(name: "HaloAppCore", targets: ["HaloAppCore"]),
+        .library(name: "HaloMemory", targets: ["HaloMemory"]),
         .library(name: "HaloBridgeKit", targets: ["HaloBridgeKit"]),
         .executable(name: "halo-bridge", targets: ["halo-bridge"]),
     ],
@@ -43,12 +44,14 @@ let package = Package(
         .target(name: "HaloLabels", dependencies: ["HaloCore", "HaloBridgeKit"]),
         // Live lens pipeline: frames -> detect -> track -> throttled embed -> match (seams only).
         .target(name: "HaloLens", dependencies: ["HaloCore", "HaloTracking", "HaloMatching"]),
+        // On-device memory hooks (Foundation Models). Never calls off-device models.
+        .target(name: "HaloMemory", dependencies: ["HaloCore"]),
         // App composition root + screen models (testable on the macOS host; App/ stays thin).
         .target(
             name: "HaloAppCore",
             dependencies: [
                 "HaloCore", "HaloStore", "HaloMatching", "HaloClustering", "HaloTracking", "HaloVision",
-                "HaloImport", "HaloLabels", "HaloLens", "HaloUI", "HaloBridgeKit",
+                "HaloImport", "HaloLabels", "HaloLens", "HaloUI", "HaloBridgeKit", "HaloMemory",
             ]),
         // SwiftUI components (hologram label, cards).
         .target(name: "HaloUI", dependencies: ["HaloCore"], resources: [.process("Resources")]),
@@ -66,6 +69,7 @@ let package = Package(
         .testTarget(name: "HaloImportTests", dependencies: ["HaloImport", "HaloCore"]),
         .testTarget(name: "HaloUITests", dependencies: ["HaloUI", "HaloCore"]),
         .testTarget(name: "HaloLabelsTests", dependencies: ["HaloLabels", "HaloCore"]),
+        .testTarget(name: "HaloMemoryTests", dependencies: ["HaloMemory", "HaloCore"]),
         .testTarget(name: "HaloAppCoreTests", dependencies: ["HaloAppCore", "HaloCore"]),
         .testTarget(name: "HaloLensTests", dependencies: ["HaloLens", "HaloCore"]),
         .testTarget(name: "HaloBridgeKitTests", dependencies: ["HaloBridgeKit", "HaloCore"]),

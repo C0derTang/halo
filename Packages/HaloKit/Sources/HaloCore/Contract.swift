@@ -97,10 +97,14 @@ public struct FaceEmbedding: Hashable, Codable, Sendable, Identifiable {
     /// 0...1 capture quality (Vision faceCaptureQuality or equivalent).
     public var quality: Float
     public var createdAt: Date
+    /// Where the face was in the source image: normalized, top-left origin, upright orientation.
+    /// nil for embeddings stored before this field existed. Used only to crop on-device thumbnails.
+    public var faceBox: CGRect?
 
     public init(
         id: UUID = UUID(), personID: PersonID? = nil, space: EmbeddingSpace, vector: [Float],
-        source: Source, sourceRef: String? = nil, quality: Float, createdAt: Date = Date()
+        source: Source, sourceRef: String? = nil, quality: Float, createdAt: Date = Date(),
+        faceBox: CGRect? = nil
     ) {
         self.id = id
         self.personID = personID
@@ -110,6 +114,7 @@ public struct FaceEmbedding: Hashable, Codable, Sendable, Identifiable {
         self.sourceRef = sourceRef
         self.quality = quality
         self.createdAt = createdAt
+        self.faceBox = faceBox
     }
 }
 
@@ -201,10 +206,16 @@ public struct InteractionDigest: Hashable, Codable, Sendable {
         public var messagesAllTime: Int
         /// True when their latest message is newer than our latest reply.
         public var awaitingMyReply: Bool
+        /// OPTIONAL recent message excerpts (newest first, bounded), present only when the user
+        /// opted in on the Mac (`halo-bridge export --with-messages`). MESSAGE CONTENT (invariant 6):
+        /// travels only inside an authenticated DigestEnvelope, is stored only in the encrypted
+        /// on-device store, and is processed only by on-device models. Absent in older digests.
+        public var recentMessages: [DigestMessage]?
 
         public init(
             handle: String, lastMessageAt: Date?, lastFromMeAt: Date?, lastFromThemAt: Date?,
-            messagesLast30Days: Int, messagesAllTime: Int, awaitingMyReply: Bool
+            messagesLast30Days: Int, messagesAllTime: Int, awaitingMyReply: Bool,
+            recentMessages: [DigestMessage]? = nil
         ) {
             self.handle = handle
             self.lastMessageAt = lastMessageAt
@@ -213,9 +224,25 @@ public struct InteractionDigest: Hashable, Codable, Sendable {
             self.messagesLast30Days = messagesLast30Days
             self.messagesAllTime = messagesAllTime
             self.awaitingMyReply = awaitingMyReply
+            self.recentMessages = recentMessages
         }
     }
 
+    /// One message excerpt. See `Entry.recentMessages` for handling rules.
+    public struct DigestMessage: Hashable, Codable, Sendable {
+        public var date: Date
+        public var fromMe: Bool
+        /// Plain text, truncated by the bridge (<= 500 characters).
+        public var text: String
+
+        public init(date: Date, fromMe: Bool, text: String) {
+            self.date = date
+            self.fromMe = fromMe
+            self.text = text
+        }
+    }
+
+    /// Unchanged by `recentMessages` (an optional, backward-compatible field).
     public static let currentVersion = 1
     public var version: Int
     public var generatedAt: Date
@@ -225,6 +252,41 @@ public struct InteractionDigest: Hashable, Codable, Sendable {
         self.version = version
         self.generatedAt = generatedAt
         self.entries = entries
+    }
+}
+
+// MARK: - Memory hooks
+
+/// A short thing worth remembering about a person ("Just started at Acme", "Training for a
+/// marathon"). Shown as `.memoryHook` chips. Private: on-device only.
+public struct MemoryHook: Hashable, Codable, Sendable, Identifiable {
+    public enum Source: String, Codable, Sendable {
+        /// Typed by the user (person notes or a Moment).
+        case userNote
+        /// Captured from the lens as a Moment ("talked about her new job").
+        case moment
+        /// Generated on-device (Foundation Models) from recent messages.
+        case onDeviceSummary
+    }
+
+    public var id: UUID
+    public var personID: PersonID
+    public var text: String
+    public var source: Source
+    public var createdAt: Date
+    /// When this hook should stop being shown (e.g. summaries go stale); nil = never.
+    public var expiresAt: Date?
+
+    public init(
+        id: UUID = UUID(), personID: PersonID, text: String, source: Source,
+        createdAt: Date = Date(), expiresAt: Date? = nil
+    ) {
+        self.id = id
+        self.personID = personID
+        self.text = text
+        self.source = source
+        self.createdAt = createdAt
+        self.expiresAt = expiresAt
     }
 }
 

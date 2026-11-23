@@ -141,11 +141,47 @@ public protocol PrivacyStoring: Sendable {
     func eraseEverything() async throws
 }
 
+// MARK: - Memory hooks
+
+/// Store operations for memory hooks. Implemented by HaloStore. `forget(person)` and
+/// `eraseEverything()` MUST delete the person's hooks too (invariant 3).
+public protocol MemoryStoring: Sendable {
+    func hooks(for person: PersonID, now: Date) async throws -> [MemoryHook]  // unexpired, newest first
+    func addHook(_ hook: MemoryHook) async throws
+    /// Replace all hooks of `source` for the person (used by the on-device summarizer).
+    func replaceHooks(for person: PersonID, source: MemoryHook.Source, with hooks: [MemoryHook])
+        async throws
+    func deleteHook(id: UUID) async throws
+}
+
+/// Turns a person's recent message excerpts into <= 3 short memory hooks, ON DEVICE ONLY.
+public protocol MemoryHookGenerating: Sendable {
+    /// False when the on-device model is unavailable (unsupported device, Apple Intelligence off).
+    var isAvailable: Bool { get async }
+    func hooks(for person: Person, messages: [InteractionDigest.DigestMessage], now: Date)
+        async throws -> [MemoryHook]
+}
+
 // MARK: - Labels
 
 public protocol LabelRanking: Sendable {
     func label(for person: Person, identities: [Identity], digest: InteractionDigest?, now: Date)
         -> LabelData
+    /// Same as above plus the person's memory hooks. Default ignores hooks; rankers that show
+    /// `.memoryHook` chips implement this one.
+    func label(
+        for person: Person, identities: [Identity], digest: InteractionDigest?, hooks: [MemoryHook],
+        now: Date
+    ) -> LabelData
+}
+
+extension LabelRanking {
+    public func label(
+        for person: Person, identities: [Identity], digest: InteractionDigest?, hooks: [MemoryHook],
+        now: Date
+    ) -> LabelData {
+        label(for: person, identities: identities, digest: digest, now: now)
+    }
 }
 
 /// Safe default: name + relationship only, no chips.
