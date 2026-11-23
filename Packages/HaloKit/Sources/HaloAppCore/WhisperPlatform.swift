@@ -13,27 +13,27 @@ import Foundation
 /// as `.bluetooth` (the announcer requires user confirmation per device, since car kits look the
 /// same). Everything else (speaker, receiver, AirPlay, HDMI, USB, car) is `.other`.
 public struct SystemAudioRouteChecker: AudioRouteChecking {
-    public init() {}
+    public init() {
+        #if os(iOS)
+            // Guards the raw-value constants in `AudioOutput.Kind(portType:)` against SDK changes.
+            assert(AVAudioSession.Port.headphones.rawValue == AudioOutput.Kind.headphonesPort)
+            assert(AVAudioSession.Port.bluetoothA2DP.rawValue == AudioOutput.Kind.bluetoothA2DPPort)
+            assert(AVAudioSession.Port.bluetoothHFP.rawValue == AudioOutput.Kind.bluetoothHFPPort)
+            assert(AVAudioSession.Port.bluetoothLE.rawValue == AudioOutput.Kind.bluetoothLEPort)
+        #endif
+    }
 
     public var outputs: [AudioOutput] {
         #if os(iOS)
             return AVAudioSession.sharedInstance().currentRoute.outputs.map {
-                AudioOutput(portUID: $0.uid, name: $0.portName, kind: Self.kind($0.portType))
+                AudioOutput(
+                    portUID: $0.uid, name: $0.portName, kind: AudioOutput.Kind(portType: $0.portType.rawValue)
+                )
             }
         #else
             return []
         #endif
     }
-
-    #if os(iOS)
-        static func kind(_ port: AVAudioSession.Port) -> AudioOutput.Kind {
-            switch port {
-            case .headphones: return .wiredHeadphones
-            case .bluetoothA2DP, .bluetoothHFP, .bluetoothLE: return .bluetooth
-            default: return .other
-            }
-        }
-    #endif
 }
 
 /// Persists confirmed Bluetooth device UIDs in UserDefaults (device identifiers, not personal data).
@@ -58,34 +58,49 @@ public final class UserDefaultsTrustedAudioDeviceStore: TrustedAudioDeviceStore 
 }
 
 /// Speaks one utterance at a time; `stop()` halts immediately and drops the completion.
+/// Delegate events are matched to their own utterance, so a late event for an old utterance can
+/// never complete the current one (the announcer re-checks the route before each utterance).
 @MainActor
 public final class SystemWhisperSpeech: NSObject, WhisperSpeaking, AVSpeechSynthesizerDelegate {
     private let synthesizer = AVSpeechSynthesizer()
-    private var completion: (@MainActor () -> Void)?
+    private let gate: WhisperUtteranceGate
+    private var ids: [ObjectIdentifier: Int] = [:]
 
-    public override init() {
+    public init(timeout: Duration = .seconds(10)) {
+        gate = WhisperUtteranceGate(timeout: timeout)
         super.init()
         synthesizer.delegate = self
+        gate.onTimeout = { [weak self] in self?.synthesizer.stopSpeaking(at: .immediate) }
     }
 
-    public func speak(_ text: String, completion: @escaping @MainActor () -> Void) {
-        self.completion = completion
-        synthesizer.speak(AVSpeechUtterance(string: text))
+    public func speak(_ text: String, completion: @escaping @MainActor (WhisperSpeechResult) -> Void) {
+        let utterance = AVSpeechUtterance(string: text)
+        ids[ObjectIdentifier(utterance)] = gate.begin(completion)
+        synthesizer.speak(utterance)
     }
 
     public func stop() {
-        completion = nil
+        gate.cancel()
         synthesizer.stopSpeaking(at: .immediate)
     }
 
     public nonisolated func speechSynthesizer(
         _ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance
     ) {
-        Task { @MainActor in
-            let done = self.completion
-            self.completion = nil
-            done?()
-        }
+        let key = ObjectIdentifier(utterance)
+        Task { @MainActor in self.end(key, .finished) }
+    }
+
+    public nonisolated func speechSynthesizer(
+        _ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance
+    ) {
+        let key = ObjectIdentifier(utterance)
+        Task { @MainActor in self.end(key, .interrupted) }
+    }
+
+    private func end(_ key: ObjectIdentifier, _ result: WhisperSpeechResult) {
+        guard let id = ids.removeValue(forKey: key) else { return }
+        gate.end(id, result)
     }
 }
 
@@ -103,6 +118,7 @@ public final class SystemWhisperHaptics: WhisperHaptics {
 /// Forwards `AVAudioSession.routeChangeNotification` (iOS) to a handler on the main actor.
 @MainActor
 public final class WhisperRouteObserver {
+    // Only written in init and read in deinit, never concurrently; NSObjectProtocol is not Sendable.
     nonisolated(unsafe) private var token: (any NSObjectProtocol)?
 
     public init(handler: @escaping @MainActor @Sendable () -> Void) {

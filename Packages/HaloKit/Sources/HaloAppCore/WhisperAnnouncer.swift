@@ -56,11 +56,19 @@ public final class InMemoryTrustedAudioDeviceStore: TrustedAudioDeviceStore {
     public func trust(_ portUID: String) { uids.insert(portUID) }
 }
 
+public enum WhisperSpeechResult: Sendable {
+    /// Played to the end.
+    case finished
+    /// Cancelled by the system or timed out: the person was not (fully) heard.
+    case interrupted
+}
+
 /// Speech output. Utterances are never queued inside the synthesizer: the announcer hands over one
 /// at a time.
 @MainActor public protocol WhisperSpeaking: AnyObject {
-    /// Speaks `text`; calls `completion` only when it finished playing (not when stopped).
-    func speak(_ text: String, completion: @escaping @MainActor () -> Void)
+    /// Speaks `text`; calls `completion` exactly once when it ends on its own (finished, cancelled
+    /// by the system, or timed out). Not called after `stop()`.
+    func speak(_ text: String, completion: @escaping @MainActor (WhisperSpeechResult) -> Void)
     /// Stops immediately and drops the pending completion.
     func stop()
 }
@@ -83,7 +91,10 @@ public final class InMemoryTrustedAudioDeviceStore: TrustedAudioDeviceStore {
 @Observable
 @MainActor
 public final class WhisperAnnouncer {
-    @ObservationIgnored public var settings: WhisperSettings
+    /// Turning whisper off cancels any queued or playing speech immediately.
+    @ObservationIgnored public var settings: WhisperSettings {
+        didSet { if !settings.isEnabled { cancelAll() } }
+    }
     /// A Bluetooth output the user hasn't confirmed yet. Nothing is announced while it is the route;
     /// the UI asks the user, then calls `confirmPendingDevice()` or `dismissPendingDevice()`.
     public private(set) var pendingDeviceConfirmation: AudioOutput?
@@ -188,11 +199,12 @@ public final class WhisperAnnouncer {
         let next = queue.removeFirst()
         current = next
         let token = generation
-        speech.speak(next.text) { [weak self] in self?.finished(token) }
+        speech.speak(next.text) { [weak self] result in self?.finished(token, result) }
     }
 
-    private func finished(_ token: Int) {
-        guard token == generation, current != nil else { return }
+    private func finished(_ token: Int, _ result: WhisperSpeechResult) {
+        guard token == generation, let done = current else { return }
+        if result == .interrupted { announced.remove(done.person) }
         current = nil
         pump()
     }

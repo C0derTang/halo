@@ -18,8 +18,8 @@ let whisperSpeaker = AudioOutput(portUID: "spk", name: "Speaker", kind: .other)
 @MainActor final class WhisperTestSpeech: WhisperSpeaking {
     var spoken: [String] = []
     var stops = 0
-    var completion: (@MainActor () -> Void)?
-    func speak(_ text: String, completion: @escaping @MainActor () -> Void) {
+    var completion: (@MainActor (WhisperSpeechResult) -> Void)?
+    func speak(_ text: String, completion: @escaping @MainActor (WhisperSpeechResult) -> Void) {
         spoken.append(text)
         self.completion = completion
     }
@@ -27,10 +27,10 @@ let whisperSpeaker = AudioOutput(portUID: "spk", name: "Speaker", kind: .other)
         stops += 1
         completion = nil
     }
-    func finish() {
+    func finish(_ result: WhisperSpeechResult = .finished) {
         let c = completion
         completion = nil
-        c?()
+        c?(result)
     }
 }
 
@@ -181,6 +181,26 @@ struct WhisperAnnouncerTests {
         a.dismissPendingDevice()
         a.update([item(1, ada)])
         #expect(a.pendingDeviceConfirmation == nil && speech.spoken.isEmpty)
+    }
+
+    @Test func interruptedUtteranceIsReannounced() {
+        let a = make(route: WhisperTestRoute([whisperWired]))
+        a.update([item(1, ada)])
+        speech.finish(.interrupted)
+        a.update([item(1, ada)])
+        #expect(speech.spoken.count == 2)
+    }
+
+    @Test func disablingCancelsImmediately() {
+        let a = make(route: WhisperTestRoute([whisperWired]))
+        a.update([item(1, ada), item(2, ben, name: "Ben")])
+        a.settings.isEnabled = false
+        #expect(speech.stops == 1)
+        speech.finish()
+        #expect(speech.spoken.count == 1)
+        a.settings.isEnabled = true
+        a.update([item(2, ben, name: "Ben")])
+        #expect(speech.spoken.count == 2)
     }
 
     @Test func newSessionAnnouncesAgain() {
