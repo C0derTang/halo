@@ -79,6 +79,34 @@ import Testing
         #expect(error?.isRecognitionUnavailable == true)
     }
 
+    @MainActor @Test func asyncLoadOfMissingModelThrowsTypedErrorFromMainActor() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "halo-empty-\(UUID().uuidString)")
+        let error = await #expect(throws: HaloVisionError.self) {
+            try await CoreMLFaceEmbedder.load(directory: dir)
+        }
+        guard case .modelNotFound(let url) = error else {
+            Issue.record("expected modelNotFound, got \(String(describing: error))")
+            return
+        }
+        #expect(url.lastPathComponent == "HaloFaceEmbedder.mlmodelc")
+
+        let package = dir.appendingPathComponent("x.mlpackage")
+        try FileManager.default.createDirectory(at: package, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        await #expect(throws: HaloVisionError.modelNotCompiled(package)) {
+            try await CoreMLFaceEmbedder.load(compiledModelAt: package)
+        }
+    }
+
+    /// `load` does its blocking work through `offMainActor`, which must leave the main thread even
+    /// when awaited from the main actor.
+    @MainActor @Test func asyncLoadRunsOffTheMainThread() async throws {
+        #expect(pthread_main_np() != 0)
+        let onMain = try await CoreMLFaceEmbedder.offMainActor { pthread_main_np() != 0 }
+        #expect(!onMain)
+    }
+
     @Test func perFaceFailuresDoNotMeanUnavailable() {
         #expect(!HaloVisionError.degenerateEmbedding.isRecognitionUnavailable)
         #expect(!HaloVisionError.dimensionMismatch(expected: 512, actual: 128).isRecognitionUnavailable)
@@ -145,6 +173,26 @@ struct FetchedModelTests {
         #expect(abs(norm - 1) < 1e-4)
         // Deterministic for identical input.
         #expect(try await embedder.embed(face: face, in: image) == vector)
+    }
+
+    @Test func frameInEveryOrientationEmbedsLikeTheUprightImage() async throws {
+        let url = try #require(FetchedModel.url)
+        let embedder = try await CoreMLFaceEmbedder.load(compiledModelAt: url)
+        let upright = try SyntheticFace.uprightImage()
+        let face = SyntheticFace.observation
+        let reference = try await embedder.embed(face: face, in: upright)
+        for orientation in allOrientations {
+            let raw = try FrameFixtures.rawImage(from: upright, orientation: orientation)
+            let frame = VideoFrame(
+                pixelBuffer: try FrameFixtures.bgraBuffer(from: raw), orientation: orientation, timestamp: 0)
+            for vector in [
+                try await embedder.embed(face: face, in: frame),
+                try await embedder.embed(face: face, in: raw, orientation: orientation),
+            ] {
+                let cosine = zip(vector, reference).reduce(Float(0)) { $0 + $1.0 * $1.1 }
+                #expect(cosine > 0.99, "orientation \(orientation.rawValue): cosine \(cosine)")
+            }
+        }
     }
 }
 

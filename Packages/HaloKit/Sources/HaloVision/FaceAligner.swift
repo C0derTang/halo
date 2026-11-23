@@ -1,6 +1,8 @@
 import CoreGraphics
+import CoreImage
 import Foundation
 import HaloCore
+import ImageIO
 
 /// A 2-D similarity transform (uniform scale, rotation, translation; no reflection or shear):
 ///
@@ -99,11 +101,18 @@ public struct AlignedFace: Sendable {
 ///
 /// With five landmarks (see `FivePointLandmarks`) it uses the least-squares similarity transform
 /// onto `arcFaceTemplate`. Without them it falls back to a padded square crop around the box.
+///
+/// All coordinates are continuous pixels with a top-left origin: pixel `i` covers `[i, i + 1)` and
+/// its centre is `i + 0.5`. Rendering goes through Core Image, from a `CGImage` or straight from a
+/// camera `CVPixelBuffer` (any pixel format Core Image reads, e.g. BGRA or 420f), honouring a
+/// `CGImagePropertyOrientation`: only the 112x112 output is ever rendered, never an upright copy of
+/// the whole frame. The shared context does not cache intermediates.
 public struct FaceAligner: Sendable {
     public static let outputSize = 112
 
-    /// InsightFace `arcface_dst` for 112x112 crops, in crop pixels (top-left origin):
-    /// image-left eye, image-right eye, nose tip, image-left mouth corner, image-right mouth corner.
+    /// InsightFace `arcface_dst` for 112x112 crops, verbatim (OpenCV pixel-index coordinates, where
+    /// pixel `i`'s centre is at `i`): image-left eye, image-right eye, nose tip, image-left mouth
+    /// corner, image-right mouth corner.
     public static let arcFaceTemplate: [CGPoint] = [
         CGPoint(x: 38.2946, y: 51.6963),
         CGPoint(x: 73.5318, y: 51.5014),
@@ -111,6 +120,20 @@ public struct FaceAligner: Sendable {
         CGPoint(x: 41.5493, y: 92.3655),
         CGPoint(x: 70.7299, y: 92.2041),
     ]
+
+    /// OpenCV pixel-index coordinates are this module's continuous coordinates minus 0.5 px.
+    public static let openCVPixelCentreOffset: CGFloat = 0.5
+
+    /// The alignment target in this module's continuous crop coordinates: `arcFaceTemplate` + 0.5.
+    ///
+    /// InsightFace estimates `M` from landmarks in OpenCV index space (ours − 0.5 px) onto
+    /// `arcface_dst` and samples crop pixel `j` at `M⁻¹(j)`. We sample crop pixel `j` at its centre
+    /// `j + 0.5`, so the equivalent continuous transform is `T(p) = M(p − 0.5) + 0.5`, which is
+    /// exactly the similarity from our landmarks onto the template shifted by +0.5. That gives
+    /// sample-for-sample InsightFace parity (pinned by `FaceAlignerTests`).
+    public static let alignmentTarget: [CGPoint] = arcFaceTemplate.map {
+        CGPoint(x: $0.x + openCVPixelCentreOffset, y: $0.y + openCVPixelCentreOffset)
+    }
 
     /// Extra margin around the detector box for the no-landmark fallback, as a fraction of the
     /// box's longer side.
@@ -120,11 +143,15 @@ public struct FaceAligner: Sendable {
         self.boxPadding = boxPadding
     }
 
-    /// Transform from image pixels (top-left origin) to crop pixels (top-left origin).
+    /// Shared renderer. `CIContext` is thread-safe (`NS_SWIFT_SENDABLE`); creating one is costly,
+    /// so every aligner reuses this one.
+    static let renderContext = CIContext(options: [.cacheIntermediates: false])
+
+    /// Transform from upright image pixels (top-left origin) to crop pixels (top-left origin).
     public func transform(for face: FaceObservation, imageSize: CGSize) -> SimilarityTransform {
         if face.landmarks.count == FivePointLandmarks.count {
             let source = face.landmarks.map { VisionGeometry.pixelPoint($0, imageSize: imageSize) }
-            if let t = SimilarityTransform.estimate(from: source, to: Self.arcFaceTemplate) {
+            if let t = SimilarityTransform.estimate(from: source, to: Self.alignmentTarget) {
                 return t
             }
         }
@@ -142,39 +169,65 @@ public struct FaceAligner: Sendable {
         )
     }
 
-    /// Renders the aligned 112x112 crop. Pixels outside the source image are black.
+    /// Renders the aligned 112x112 crop from an upright image. Pixels outside the image are black.
     public func alignedFace(_ face: FaceObservation, in image: CGImage) throws -> AlignedFace {
-        let size = CGSize(width: image.width, height: image.height)
-        return try render(image, transform: transform(for: face, imageSize: size))
+        try alignedFace(face, in: CIImage(cgImage: image), orientation: .up)
     }
 
-    /// Warps `image` by `transform` (image pixels -> crop pixels, both top-left origin).
+    /// Renders the aligned crop from a stored image (or `CIImage(cvPixelBuffer:)` of a camera
+    /// frame) whose display orientation is `orientation`. `face` is in the upright image.
+    public func alignedFace(
+        _ face: FaceObservation, in source: CIImage, orientation: CGImagePropertyOrientation
+    )
+        throws -> AlignedFace
+    {
+        let upright = OrientationGeometry.uprightSize(rawSize: source.extent.size, orientation: orientation)
+        return try render(
+            source, orientation: orientation, transform: transform(for: face, imageSize: upright))
+    }
+
+    /// Warps an upright `image` by `transform` (image pixels -> crop pixels, both top-left origin).
     public func render(_ image: CGImage, transform: SimilarityTransform) throws -> AlignedFace {
-        let side = Self.outputSize
-        let bytesPerRow = side * 4
-        var pixels = [UInt8](repeating: 0, count: side * bytesPerRow)
-        let ok = pixels.withUnsafeMutableBytes { buffer -> Bool in
-            guard
-                let space = CGColorSpace(name: CGColorSpace.sRGB),
-                let context = CGContext(
-                    data: buffer.baseAddress, width: side, height: side, bitsPerComponent: 8,
-                    bytesPerRow: bytesPerRow, space: space,
-                    bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)
-            else { return false }
-            context.interpolationQuality = .high
-            context.setFillColor(CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 1))
-            context.fill(CGRect(x: 0, y: 0, width: side, height: side))
-            // Core Graphics user space is bottom-left origin for both the source image and the
-            // bitmap, so conjugate the top-left transform with a vertical flip on each side:
-            // user(image) -> top-left(image) -> top-left(crop) -> user(crop).
-            let imageHeight = CGFloat(image.height)
-            let flipImage = CGAffineTransform(a: 1, b: 0, c: 0, d: -1, tx: 0, ty: imageHeight)
-            let flipCrop = CGAffineTransform(a: 1, b: 0, c: 0, d: -1, tx: 0, ty: CGFloat(side))
-            context.concatenate(flipImage.concatenating(transform.affine).concatenating(flipCrop))
-            context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
-            return true
+        try render(CIImage(cgImage: image), orientation: .up, transform: transform)
+    }
+
+    /// Warps `source` (stored pixels, display orientation `orientation`) by `transform`, which maps
+    /// UPRIGHT image pixels to crop pixels (both top-left origin).
+    public func render(
+        _ source: CIImage, orientation: CGImagePropertyOrientation, transform: SimilarityTransform
+    )
+        throws -> AlignedFace
+    {
+        let extent = source.extent
+        guard !extent.isInfinite, !extent.isNull, extent.width >= 1, extent.height >= 1 else {
+            throw HaloVisionError.preprocessingFailed
         }
-        guard ok else { throw HaloVisionError.preprocessingFailed }
+        let side = Self.outputSize
+        // Core Image space is bottom-left origin for both the source and the output, so the chain is
+        // CI(raw) -> top-left(raw) -> top-left(upright) -> top-left(crop) -> CI(crop).
+        let rawFromCI = CGAffineTransform(a: 1, b: 0, c: 0, d: -1, tx: -extent.minX, ty: extent.maxY)
+        let uprightFromRaw = OrientationGeometry.uprightPixelTransform(
+            rawSize: extent.size, orientation: orientation)
+        let ciFromCrop = CGAffineTransform(a: 1, b: 0, c: 0, d: -1, tx: 0, ty: CGFloat(side))
+        let matrix =
+            rawFromCI
+            .concatenating(uprightFromRaw)
+            .concatenating(transform.affine)
+            .concatenating(ciFromCrop)
+        let warped = source.transformed(by: matrix, highQualityDownsample: true)
+
+        guard let space = CGColorSpace(name: CGColorSpace.sRGB) else {
+            throw HaloVisionError.preprocessingFailed
+        }
+        let bytesPerRow = side * 4
+        // Premultiplied RGBA8 over a transparent background: area outside the source is black.
+        var pixels = [UInt8](repeating: 0, count: side * bytesPerRow)
+        pixels.withUnsafeMutableBytes { buffer in
+            guard let base = buffer.baseAddress else { return }
+            Self.renderContext.render(
+                warped, toBitmap: base, rowBytes: bytesPerRow,
+                bounds: CGRect(x: 0, y: 0, width: side, height: side), format: .RGBA8, colorSpace: space)
+        }
         return AlignedFace(width: side, height: side, rgbx: pixels)
     }
 }
