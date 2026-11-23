@@ -1,6 +1,7 @@
 import Foundation
 import GRDB
 import HaloCore
+import Synchronization
 
 /// Encrypted-at-rest local people graph (GRDB + iOS Data Protection `.complete`).
 ///
@@ -8,16 +9,27 @@ import HaloCore
 /// - `confirmedGallery(space:)` only returns embeddings owned by a `confirmed` person whose space
 ///   matches exactly (model ID and dimension).
 /// - `forget(_:)` removes every row that references the person, in one transaction, with
-///   `PRAGMA secure_delete = ON` so freed pages are zeroed on disk.
+///   `PRAGMA secure_delete = ON` so freed pages are zeroed on disk, then folds the WAL back into
+///   the main file. If a reader blocks that checkpoint, the erasure stays pending and is retried
+///   after every later write and by `flushPendingErasure()`.
 public final class PeopleStore: PeopleStoring {
+    /// How long a checkpoint/write waits for other connections before giving up.
+    public static let defaultBusyTimeout: TimeInterval = 2
+
     let writer: any DatabaseWriter
+    /// True while a forget's WAL truncate checkpoint has not completed yet.
+    private let erasurePending = Mutex(false)
 
     /// Opens (or creates) the store at `path`. On iOS the database file and its `-wal`/`-shm`
     /// siblings get `FileProtectionType.complete`. Prefer a dedicated directory such as
     /// `PeopleStore.defaultDirectory()` so files SQLite recreates later inherit the protection.
     public convenience init(path: String) throws {
+        try self.init(path: path, busyTimeout: Self.defaultBusyTimeout)
+    }
+
+    convenience init(path: String, busyTimeout: TimeInterval) throws {
         try FileProtection.prepareDatabaseFile(at: path)
-        let pool = try DatabasePool(path: path, configuration: Self.configuration())
+        let pool = try DatabasePool(path: path, configuration: Self.configuration(busyTimeout: busyTimeout))
         try FileProtection.protectDatabaseFiles(at: path)
         try self.init(writer: pool)
     }
@@ -38,8 +50,9 @@ public final class PeopleStore: PeopleStoring {
         try Schema.migrator.migrate(writer)
     }
 
-    static func configuration() -> Configuration {
+    static func configuration(busyTimeout: TimeInterval = defaultBusyTimeout) -> Configuration {
         var config = Configuration()
+        config.busyMode = .timeout(busyTimeout)
         config.foreignKeysEnabled = true
         config.label = "HaloStore"
         config.prepareDatabase { db in
@@ -67,7 +80,7 @@ public final class PeopleStore: PeopleStoring {
 
     public func upsert(_ person: Person) async throws {
         let birthday = try RowDecoding.encodeBirthday(person.birthday)
-        try await writer.write { db in
+        try await write { db in
             // ON CONFLICT DO UPDATE (never INSERT OR REPLACE, which would cascade-delete children).
             try db.execute(
                 sql: """
@@ -105,7 +118,7 @@ public final class PeopleStore: PeopleStoring {
     /// Idempotent for the same owner; throws `identityConflict` if another person already owns
     /// the (kind, value) pair, so identity resolution never silently reassigns a handle.
     public func addIdentity(_ identity: Identity) async throws {
-        try await writer.write { db in
+        try await write { db in
             if let owner = try Row.fetchOne(
                 db, sql: "SELECT personId FROM identity WHERE kind = ? AND value = ?",
                 arguments: [identity.kind.rawValue, identity.value])
@@ -163,7 +176,7 @@ public final class PeopleStore: PeopleStoring {
             throw PeopleStoreError.dimensionMismatch(
                 expected: embedding.space.dimension, actual: embedding.vector.count)
         }
-        try await writer.write { db in
+        try await write { db in
             for embedding in embeddings {
                 try db.execute(
                     sql: """
@@ -201,12 +214,39 @@ public final class PeopleStore: PeopleStoring {
             }
             try db.execute(sql: "DELETE FROM person WHERE id = ?", arguments: [key])
         }
-        // Fold the WAL (whose frames hold the zeroed pages) back into the main file and truncate
-        // it, so no pre-delete page images linger in the -wal sibling. Best effort: a concurrent
-        // reader can make it SQLITE_BUSY; secure_delete has already zeroed the content.
-        try? await writer.writeWithoutTransaction { db in
-            _ = try db.checkpoint(.truncate)
+        erasurePending.withLock { $0 = true }
+        await flushPendingErasure()
+    }
+
+    /// Whether a forget's on-disk erasure (WAL checkpoint) is still waiting on a reader.
+    public var hasPendingErasure: Bool { erasurePending.withLock { $0 } }
+
+    /// Completes a pending forget erasure: folds the WAL (whose frames hold the zeroed pages)
+    /// back into the main file, overwriting the pre-delete pages, and truncates the WAL to zero.
+    /// The app calls this when it moves to the background. Returns true when nothing is pending.
+    @discardableResult
+    public func flushPendingErasure() async -> Bool {
+        guard hasPendingErasure else { return true }
+        do {
+            try await writer.writeWithoutTransaction { db in
+                _ = try db.checkpoint(.truncate)
+            }
+            erasurePending.withLock { $0 = false }
+            return true
+        } catch {
+            // SQLITE_BUSY after the busy timeout: a reader still holds an older snapshot. Stay
+            // pending; the next write or flush retries.
+            return false
         }
+    }
+
+    /// Runs a write transaction, then retries any pending forget erasure.
+    private func write<T: Sendable>(
+        _ updates: @escaping @Sendable (Database) throws -> T
+    ) async throws -> T {
+        let result = try await writer.write(updates)
+        await flushPendingErasure()
+        return result
     }
 
     /// Removes digest entries whose handle is one of the forgotten person's handle-like
@@ -215,6 +255,12 @@ public final class PeopleStore: PeopleStoring {
         guard let row = try Row.fetchOne(db, sql: "SELECT json FROM digest WHERE id = 1"),
             let json: Data = row["json"]
         else { return }
+        // Fail toward deletion: a digest we cannot read cannot be scrubbed, so drop it entirely
+        // (the bridge regenerates it) rather than letting forget fail.
+        guard var digest = try? JSONDecoder().decode(InteractionDigest.self, from: json) else {
+            try db.execute(sql: "DELETE FROM digest")
+            return
+        }
         let handleKinds: [Identity.Kind] = [.imessageHandle, .phone, .email]
         let kindList = handleKinds.map { "'\($0.rawValue)'" }.joined(separator: ", ")
         let mine = try Set(
@@ -228,7 +274,6 @@ public final class PeopleStore: PeopleStoring {
                 arguments: [key]))
         let handles = mine.subtracting(others)
         let lowered = Set(handles.map { $0.lowercased() })
-        var digest = try JSONDecoder().decode(InteractionDigest.self, from: json)
         let before = digest.entries.count
         digest.entries.removeAll { handles.contains($0.handle) || lowered.contains($0.handle.lowercased()) }
         guard digest.entries.count != before else { return }
@@ -250,7 +295,7 @@ public final class PeopleStore: PeopleStoring {
     /// Replaces the stored digest; only the latest is kept.
     public func saveDigest(_ digest: InteractionDigest) async throws {
         let json = try JSONEncoder().encode(digest)
-        try await writer.write { db in
+        try await write { db in
             try db.execute(
                 sql: """
                     INSERT INTO digest (id, version, generatedAt, json) VALUES (1, ?, ?, ?)
@@ -267,7 +312,7 @@ public final class PeopleStore: PeopleStoring {
 
     /// Records that `id` was recognized at `at`. Deleted with the person on `forget`.
     public func logRecognition(of id: PersonID, at date: Date = Date()) async throws {
-        try await writer.write { db in
+        try await write { db in
             try db.execute(
                 sql: "INSERT INTO recognition_log (personId, at) VALUES (?, ?)",
                 arguments: [id.description, date.storedValue])

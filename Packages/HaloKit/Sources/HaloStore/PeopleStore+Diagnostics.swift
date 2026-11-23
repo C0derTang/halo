@@ -61,4 +61,46 @@ extension PeopleStore {
             return counts
         }
     }
+
+    /// Replaces the stored digest payload with arbitrary bytes (to simulate corruption).
+    func overwriteDigestJSON(_ json: Data) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: """
+                    INSERT INTO digest (id, version, generatedAt, json) VALUES (1, 1, 0, ?)
+                    ON CONFLICT(id) DO UPDATE SET json = excluded.json
+                    """,
+                arguments: [json])
+        }
+    }
+
+    /// Opens a read transaction on a reader connection (pinning the current WAL snapshot) and keeps
+    /// it open on a background thread until `release()` is called on the returned handle.
+    func holdReadTransaction() -> HeldReadTransaction {
+        let held = HeldReadTransaction()
+        let writer = self.writer
+        Thread.detachNewThread {
+            try? writer.read { db in
+                _ = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM person")
+                held.started.signal()
+                held.releaseSignal.wait()
+            }
+            held.started.signal()  // never leave the caller blocked if the read failed
+            held.finished.signal()
+        }
+        held.started.wait()
+        return held
+    }
+}
+
+final class HeldReadTransaction: Sendable {
+    let started = DispatchSemaphore(value: 0)
+    let releaseSignal = DispatchSemaphore(value: 0)
+    let finished = DispatchSemaphore(value: 0)
+
+    /// Ends the read transaction and waits until the reader connection is released.
+    func release() {
+        releaseSignal.signal()
+        finished.wait()
+    }
 }

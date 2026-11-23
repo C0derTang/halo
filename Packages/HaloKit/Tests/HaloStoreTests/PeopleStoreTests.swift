@@ -331,25 +331,97 @@ import Testing
         try await Self.assertForgotten(store, target: target, bystander: bystander)
     }
 
-    @Test func forgetCascadeLeavesZeroRowsOnDiskAndAfterReopen() async throws {
-        let (directory, path) = try Fixture.temporaryDatabasePath()
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let target: Person
-        let bystander: Person
-        do {
-            let store = try PeopleStore(path: path)
-            (target, bystander) = try await Self.populate(store)
-            try await store.forget(target.id)
-            try await Self.assertForgotten(store, target: target, bystander: bystander)
-        }
-        try await Self.assertForgotten(try PeopleStore(path: path), target: target, bystander: bystander)
-
-        // secure_delete + WAL checkpoint: the forgotten name is not left in the raw files.
-        let needle = Data(target.displayName.utf8)
+    /// Raw database files under `path` that still contain any trace of `person` (name, UUID or one
+    /// of the synthetic handles `populate` gave them).
+    static func rawTraces(of person: Person, at path: String) -> [String] {
+        let needles = [
+            person.displayName, person.id.description, "+15550000009", "Target@Example.com",
+            "target@example.com", "synthetic-contact-1", "cluster-7",
+        ]
+        var traces: [String] = []
         for file in FileProtection.databaseFilePaths(for: path) {
             guard let bytes = FileManager.default.contents(atPath: file) else { continue }
-            #expect(bytes.range(of: needle) == nil, "\(file) still contains the forgotten name")
+            for needle in needles where bytes.range(of: Data(needle.utf8)) != nil {
+                traces.append("\((file as NSString).lastPathComponent): \(needle)")
+            }
         }
+        return traces
+    }
+
+    @Test func forgetErasesRawFilesWhileStoreIsStillOpen() async throws {
+        let (directory, path) = try Fixture.temporaryDatabasePath()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try PeopleStore(path: path)
+        let (target, bystander) = try await Self.populate(store)
+        #expect(!Self.rawTraces(of: target, at: path).isEmpty)
+
+        try await store.forget(target.id)
+
+        // Store still open: secure_delete zeroed the cells and the truncate checkpoint folded the
+        // WAL into the main file, so neither the main db nor the -wal holds any trace.
+        #expect(!store.hasPendingErasure)
+        #expect(Self.rawTraces(of: target, at: path) == [])
+        try await Self.assertForgotten(store, target: target, bystander: bystander)
+
+        let reopened = try PeopleStore(path: path)
+        try await Self.assertForgotten(reopened, target: target, bystander: bystander)
+    }
+
+    @Test func blockedCheckpointStaysPendingUntilFlushed() async throws {
+        let (directory, path) = try Fixture.temporaryDatabasePath()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try PeopleStore(path: path, busyTimeout: 0.05)
+        let (target, bystander) = try await Self.populate(store)
+        #expect(await store.flushPendingErasure())  // nothing pending yet
+
+        // A reader pinned to a pre-forget snapshot blocks the truncate checkpoint.
+        let reader = store.holdReadTransaction()
+        try await store.forget(target.id)
+        #expect(store.hasPendingErasure)
+        #expect(!Self.rawTraces(of: target, at: path).isEmpty)  // old pages still in the main db
+        #expect(await store.flushPendingErasure() == false)
+        try await store.logRecognition(of: bystander.id, at: Fixture.fixedDate)  // write-retry fails too
+        #expect(store.hasPendingErasure)
+        // Logically gone already, even before the on-disk erasure completes.
+        #expect(try await store.person(target.id) == nil)
+        #expect(try await store.rowsMentioning(target.id).values.reduce(0, +) == 0)
+
+        reader.release()
+        #expect(await store.flushPendingErasure())
+        #expect(!store.hasPendingErasure)
+        #expect(Self.rawTraces(of: target, at: path) == [])
+    }
+
+    @Test func pendingErasureIsRetriedOnNextWrite() async throws {
+        let (directory, path) = try Fixture.temporaryDatabasePath()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try PeopleStore(path: path, busyTimeout: 0.05)
+        let (target, bystander) = try await Self.populate(store)
+
+        let reader = store.holdReadTransaction()
+        try await store.forget(target.id)
+        #expect(store.hasPendingErasure)
+        reader.release()
+
+        var edited = bystander
+        edited.notes = "Edited after forget"
+        try await store.upsert(edited)
+        #expect(!store.hasPendingErasure)
+        #expect(Self.rawTraces(of: target, at: path) == [])
+    }
+
+    @Test func forgetDropsUndecodableDigestInsteadOfFailing() async throws {
+        let store = try PeopleStore.inMemory()
+        let (target, bystander) = try await Self.populate(store)
+        try await store.overwriteDigestJSON(Data("not a digest \(target.id)".utf8))
+
+        try await store.forget(target.id)
+
+        #expect(try await store.latestDigest() == nil)
+        #expect(try await store.rowCount("digest") == 0)
+        #expect(try await store.rowsMentioning(target.id).values.reduce(0, +) == 0)
+        #expect(try await store.person(target.id) == nil)
+        #expect(try await store.person(bystander.id) == bystander)
     }
 
     @Test func forgetUnknownPersonIsNoOp() async throws {

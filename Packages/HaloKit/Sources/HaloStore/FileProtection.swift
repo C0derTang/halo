@@ -8,13 +8,16 @@ enum FileProtection {
     }
 
     /// Creates the (empty) database file with `.complete` protection before SQLite opens it, so the
-    /// file is never on disk with a weaker protection class.
+    /// file is never on disk with a weaker protection class. The parent directory also gets
+    /// `.complete`, so `-wal`/`-shm` files SQLite (re)creates there inherit it, for custom paths too.
     static func prepareDatabaseFile(at path: String) throws {
         #if os(iOS)
             let manager = FileManager.default
             let directory = (path as NSString).deletingLastPathComponent
             if !directory.isEmpty {
                 try manager.createDirectory(atPath: directory, withIntermediateDirectories: true)
+                try manager.setAttributes(
+                    [.protectionKey: FileProtectionType.complete], ofItemAtPath: directory)
             }
             if !manager.fileExists(atPath: path) {
                 guard
