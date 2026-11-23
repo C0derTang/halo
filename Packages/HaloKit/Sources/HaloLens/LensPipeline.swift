@@ -178,6 +178,7 @@ public actor LensPipeline {
                 } else if reappeared {
                     // Tight re-match after a short blip: keep the label, re-check it first.
                     schedule.markOverdue(track.id)
+                    voter.resetStreak(for: track.id)
                 }
             } else if reappeared {
                 // Partial streak from before the miss must not count toward this face.

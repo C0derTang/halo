@@ -36,6 +36,14 @@ import Testing
         #expect(envelope.serialized == data)
     }
 
+    @Test func unknownRegionRoundTripsAndStaysUnknown() throws {
+        let data = try sealed(region: "zz")
+        let opened = try DigestEnvelope.open(data, with: phone)
+        #expect(opened.digest == Self.digest)
+        #expect(opened.normalizerRegion == "ZZ")
+        #expect(!HandleNormalizer.isKnownRegion(opened.normalizerRegion))
+    }
+
     @Test func ciphertextHidesContent() throws {
         let text = String(decoding: try sealed(), as: UTF8.self)
         #expect(!text.contains("bob@example.com"))

@@ -254,28 +254,33 @@ import Testing
     #expect(more[1][0].personID == person(1))
 }
 
-@Test func labeledTrackSurvivesOneFrameBlipButIsReverifiedNext() async {
+@Test func labeledTrackSurvivesOneFrameBlipAndIsReverifiedWithoutJumpingTheThrottle() async {
     let config = LensConfig(embedInterval: 0.25, reverifyInterval: 1, maxEmbedsPerFrame: 1)
     let h = Harness(config: config)
     h.embedder.setCode(1, x: 0.1)
     let acquire = await h.run(0..<20, faces: [face(x: 0.1)])  // embeds at frames 0, 8, 16
     #expect(acquire.last?[0].personID == person(1))
     let lastEmbed = h.embedder.calls(x: 0.1).last!.time
+    let embedsBefore = h.embedder.calls(x: 0.1).count
 
     let blip = await h.run(20..<21, faces: [])
     #expect(blip[0][0].state == .lost)
     #expect(blip[0][0].personID == person(1))
 
-    // Back on a tight IoU re-match one frame later, alongside a never-embedded newcomer that
-    // would otherwise take the single slot. The label is kept, and re-verified right away.
+    // Back on a tight IoU re-match one frame later: the label is kept, but the embedInterval
+    // throttle still applies (priority only), so the returned track is not embedded at frame 21.
     let back = await h.run(21..<22, faces: [face(x: 0.1), face(x: 0.6)])
     let returned = back[0].first { $0.smoothedBox.minX < 0.3 }!
     #expect(returned.trackID == acquire.last?[0].trackID)
     #expect(returned.personID == person(1))
+    #expect(h.embedder.calls(x: 0.1).count == embedsBefore, "re-verify jumped the throttle")
+
+    // It is re-verified the first frame it is due again, at the throttle boundary.
+    let later = await h.run(22..<30, faces: [face(x: 0.1), face(x: 0.6)])
+    #expect(later.last?.contains { $0.personID == person(1) } == true)
     let reverify = h.embedder.calls(x: 0.1).last!.time
-    #expect(reverify == h.frames.frame(21).timestamp)
-    #expect(reverify - lastEmbed < config.embedInterval, "re-verify jumped the throttle")
-    #expect(h.embedder.calls(x: 0.6).isEmpty)
+    #expect(reverify == h.frames.frame(24).timestamp)
+    #expect(reverify - lastEmbed >= config.embedInterval)
 }
 
 @Test func reverifyAfterBlipAppliesDropRules() async {

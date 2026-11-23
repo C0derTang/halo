@@ -6,11 +6,15 @@ import HaloBridgeKit
 public struct HandleNormalization: Sendable {
     public var normalizer: HandleNormalizer
 
+    /// ISO "unknown region" code, used when the locale has no region.
+    static let unknownRegion = "ZZ"
+
     public init(normalizer: HandleNormalizer) { self.normalizer = normalizer }
 
-    /// Region defaults to the device locale (falls back to US).
+    /// Region defaults to the device locale. With no region it falls back to "ZZ" (unknown):
+    /// national-format numbers then stay unnormalized instead of being guessed as US.
     public init(region: String? = Locale.current.region?.identifier) {
-        self.init(normalizer: HandleNormalizer(region: region ?? "US"))
+        self.init(normalizer: HandleNormalizer(region: region ?? Self.unknownRegion))
     }
 
     /// E.164 phone, or nil when the input is not phone-like.

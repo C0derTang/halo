@@ -101,6 +101,17 @@ public struct TrackVoter: Sendable {
         states[trackID]?.stable ?? .unknown
     }
 
+    /// Clears the track's acquire/switch streak (the run of agreeing `.known` results for a
+    /// candidate) without touching the held name, its off-streak or its majority window. Use after a
+    /// gap in observation (e.g. a short tracker blip) so a partial streak from before the gap cannot
+    /// complete a switch with frames from after it. A no-op for an untracked id.
+    public mutating func resetStreak(for trackID: TrackID) {
+        guard var state = states[trackID] else { return }
+        state.candidate = nil
+        state.candidateStreak = 0
+        states[trackID] = state
+    }
+
     /// Drops all vote state for a lost track.
     public mutating func forget(trackID: TrackID) {
         states[trackID] = nil
