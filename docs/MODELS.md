@@ -59,3 +59,13 @@ Rules:
   are never compared.
 - Calibrate `minSimilarity` / `minMargin` on a public face-verification benchmark pair list and
   record the target false-accept rate (≤ 0.1%) and the resulting thresholds here.
+
+## Voting policy
+
+`TrackVoter` (HaloMatching) turns per-frame matches into a stable name. With `n = minVotes`: a name
+needs `n` consecutive agreeing `.known` results; it drops after `n` consecutive non-matching results
+or when the held person is not a strict majority (more than half) of the last `2n` results. A
+exactly-50% window therefore drops the name. This trades recall for precision on purpose (invariant
+4): a flickering track briefly loses its label rather than risk showing a wrong one, and has to
+re-earn it with a fresh `n`-streak. `IoUTracker` likewise clears a track's identity when it is
+re-matched after more than `TrackerConfig.identityResetAfterMissed` (default 5) missed frames.

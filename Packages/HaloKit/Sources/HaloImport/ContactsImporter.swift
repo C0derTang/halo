@@ -1,4 +1,5 @@
 import Foundation
+import HaloBridgeKit
 import HaloCore
 
 public struct ContactsImportResult: Sendable {
@@ -6,6 +7,8 @@ public struct ContactsImportResult: Sendable {
     public var updated = 0
     public var unchanged = 0
     public var skipped = 0
+    /// Identities skipped because (kind, value) already belongs to a different person.
+    public var conflicts = 0
     /// Contact photos as enrollment candidates. No face processing here, and nobody is
     /// recognizable until the user confirms them (invariant 3).
     public var thumbnails: [(PersonID, Data)] = []
@@ -15,10 +18,15 @@ public struct ContactsImportResult: Sendable {
 public struct ContactsImporter: Sendable {
     private let store: any PeopleStoring
     private let source: any ContactsSource
+    private let normalization: HandleNormalization
 
-    public init(store: any PeopleStoring, source: any ContactsSource) {
+    public init(
+        store: any PeopleStoring, source: any ContactsSource,
+        normalization: HandleNormalization = HandleNormalization()
+    ) {
         self.store = store
         self.source = source
+        self.normalization = normalization
     }
 
     public func importContacts(now: Date = Date()) async throws -> ContactsImportResult {
@@ -38,12 +46,13 @@ public struct ContactsImporter: Sendable {
                     person.displayName = name
                     personTouched = true
                 }
-                if let relationship, person.relationship != relationship {
+                // Stale data: a relationship/birthday that vanished from the contact is cleared.
+                if person.relationship != relationship {
                     person.relationship = relationship
                     personTouched = true
                 }
-                if let b = record.birthday, person.birthday != b {
-                    person.birthday = b
+                if person.birthday != record.birthday {
+                    person.birthday = record.birthday
                     personTouched = true
                 }
                 if personTouched {
@@ -59,23 +68,37 @@ public struct ContactsImporter: Sendable {
                 personCreated = true
             }
 
+            // TODO: remove identities that disappeared from the contact once the store conforms to
+            // `EnrollmentStoring.removeIdentity` (store issue); until then they are left in place.
             var seen = Set(try await store.identities(for: person.id))
             var wanted = [Identity(personID: person.id, kind: .contact, value: record.identifier)]
             for p in record.phones {
-                if let v = HandleNormalization.e164(p) {
+                if let v = normalization.e164(p) {
                     wanted.append(Identity(personID: person.id, kind: .phone, value: v))
                 }
             }
             for e in record.emails {
-                if let v = HandleNormalization.email(e) {
+                if let v = normalization.email(e) {
                     wanted.append(Identity(personID: person.id, kind: .email, value: v))
                 }
             }
             var addedIdentity = false
             for identity in wanted where !seen.contains(identity) {
                 seen.insert(identity)
-                try await store.addIdentity(identity)
-                addedIdentity = true
+                do {
+                    try await store.addIdentity(identity)
+                    addedIdentity = true
+                } catch {
+                    // Store-agnostic conflict detection: if another person owns this handle, skip it
+                    // (never move a handle, never abort the import). Any other failure propagates.
+                    if let owner = try? await store.person(matching: identity.kind, value: identity.value),
+                        owner.id != person.id
+                    {
+                        result.conflicts += 1
+                    } else {
+                        throw error
+                    }
+                }
             }
             if personCreated {
                 result.created += 1

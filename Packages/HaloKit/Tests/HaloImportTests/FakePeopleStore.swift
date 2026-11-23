@@ -1,6 +1,8 @@
 import Foundation
 import HaloCore
 
+struct FakeIdentityConflict: Error {}
+
 actor FakePeopleStore: PeopleStoring {
     var people: [PersonID: Person] = [:]
     var idents: [Identity] = []
@@ -10,7 +12,11 @@ actor FakePeopleStore: PeopleStoring {
     func upsert(_ person: Person) async throws { people[person.id] = person }
     func identities(for id: PersonID) async throws -> [Identity] { idents.filter { $0.personID == id } }
     func addIdentity(_ identity: Identity) async throws {
-        if !idents.contains(identity) { idents.append(identity) }
+        if idents.contains(identity) { return }
+        if idents.contains(where: { $0.kind == identity.kind && $0.value == identity.value }) {
+            throw FakeIdentityConflict()
+        }
+        idents.append(identity)
     }
     func person(matching kind: Identity.Kind, value: String) async throws -> Person? {
         guard let i = idents.first(where: { $0.kind == kind && $0.value == value }) else { return nil }
