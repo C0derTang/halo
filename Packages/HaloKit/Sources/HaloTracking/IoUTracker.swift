@@ -47,7 +47,7 @@ public struct IoUTracker: FaceTracking, Sendable {
 
         /// Raw box extrapolated by velocity, for association.
         var predicted: CGRect {
-            let m = CGFloat(track.framesSinceSeen + 1)
+            let m = CGFloat(min(track.framesSinceSeen + 1, IoUTracker.maxExtrapolationFrames))
             return rawBox.offsetBy(dx: velocity.x * m, dy: velocity.y * m)
         }
     }
@@ -57,6 +57,8 @@ public struct IoUTracker: FaceTracking, Sendable {
     public var config: TrackerConfig
     private var entries: [Entry] = []
     private var nextID: UInt64 = 1
+    /// Cap on how many frames of velocity extrapolation a coasting track gets.
+    static let maxExtrapolationFrames = 3
 
     public init(config: TrackerConfig = TrackerConfig()) { self.config = config }
 
@@ -84,7 +86,7 @@ public struct IoUTracker: FaceTracking, Sendable {
                 if iou >= config.iouThreshold { pairs.append((iou, ti, oi)) }
             }
         }
-        assign(pairs, &trackUsed, &obsUsed, observations, timestamp)
+        assign(pairs, &trackUsed, &obsUsed, observations, timestamp, fallback: false)
 
         // Pass 2: center-distance fallback for fast motion, with a size-consistency guard.
         pairs.removeAll()
@@ -104,7 +106,7 @@ public struct IoUTracker: FaceTracking, Sendable {
                 pairs.append((-d, ti, oi))  // nearer is better
             }
         }
-        assign(pairs, &trackUsed, &obsUsed, observations, timestamp)
+        assign(pairs, &trackUsed, &obsUsed, observations, timestamp, fallback: true)
 
         // Unmatched tracks coast, then drop.
         for ti in entries.indices where !trackUsed[ti] {
@@ -124,7 +126,7 @@ public struct IoUTracker: FaceTracking, Sendable {
 
     private mutating func assign(
         _ candidates: [Pair], _ trackUsed: inout [Bool], _ obsUsed: inout [Bool],
-        _ observations: [FaceObservation], _ timestamp: TimeInterval
+        _ observations: [FaceObservation], _ timestamp: TimeInterval, fallback: Bool
     ) {
         // Best score first; deterministic tie-break on indices.
         let sorted = candidates.sorted {
@@ -135,12 +137,17 @@ public struct IoUTracker: FaceTracking, Sendable {
         for p in sorted where !trackUsed[p.t] && !obsUsed[p.o] {
             trackUsed[p.t] = true
             obsUsed[p.o] = true
-            apply(observations[p.o], to: p.t, timestamp: timestamp)
+            apply(observations[p.o], to: p.t, timestamp: timestamp, fallback: fallback)
         }
     }
 
-    private mutating func apply(_ o: FaceObservation, to i: Int, timestamp: TimeInterval) {
+    private mutating func apply(
+        _ o: FaceObservation, to i: Int, timestamp: TimeInterval, fallback: Bool
+    ) {
         var e = entries[i]
+        // Invariant: a track re-associated after a miss by the loose fallback may be a different
+        // face, so it must not keep a previous identity.
+        if fallback && e.track.framesSinceSeen > 0 { e.track.identity = .unknown }
         let b = o.boundingBox
         let missed = CGFloat(e.track.framesSinceSeen + 1)
         let dx = (b.midX - e.rawBox.midX) / missed

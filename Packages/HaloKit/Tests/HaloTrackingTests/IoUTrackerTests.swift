@@ -195,3 +195,67 @@ private func variance(_ xs: [Double]) -> Double {
     let b = last!.smoothedBox
     #expect(abs(b.midX - 0.5) < 1e-6 && abs(b.width - 0.2) < 1e-6)
 }
+
+// MARK: - Identity safety while coasting
+
+@Test func fallbackRematchAfterMissResetsIdentity() {
+    var tr = IoUTracker()
+    let id = tr.update(observations: [obs(0.3, 0.5, 0.1, t: 0)], timestamp: 0)[0].id
+    tr.setIdentity(.known(PersonID(), similarity: 0.9, margin: 0.2), for: id)
+    _ = tr.update(observations: [], timestamp: dt)
+    // Zero IoU, within center-distance: fallback re-match after a miss.
+    let out = tr.update(observations: [obs(0.38, 0.5, 0.1, t: 2 * dt)], timestamp: 2 * dt)
+    #expect(out.count == 1)
+    #expect(out[0].id == id)
+    #expect(out[0].identity == .unknown)
+}
+
+@Test func swappedFacesDuringCoastingCarryNoIdentity() {
+    var tr = IoUTracker()
+    let out0 = tr.update(
+        observations: [obs(0.3, 0.5, 0.1, t: 0), obs(0.7, 0.5, 0.1, t: 0)], timestamp: 0)
+    let left = out0.first { $0.latest.boundingBox.midX < 0.5 }!.id
+    let right = out0.first { $0.latest.boundingBox.midX > 0.5 }!.id
+    tr.setIdentity(.known(PersonID(), similarity: 0.9, margin: 0.2), for: left)
+    tr.setIdentity(.known(PersonID(), similarity: 0.9, margin: 0.2), for: right)
+    _ = tr.update(observations: [], timestamp: dt)
+    // Both reappear slightly displaced (no IoU overlap); any carried identity would be unsafe.
+    let out = tr.update(
+        observations: [obs(0.38, 0.5, 0.1, t: 2 * dt), obs(0.62, 0.5, 0.1, t: 2 * dt)],
+        timestamp: 2 * dt)
+    #expect(out.count == 2)
+    for t in out { #expect(t.identity == .unknown) }
+}
+
+@Test func extrapolationIsCapped() {
+    var tr = IoUTracker(config: TrackerConfig(maxMissedFrames: 20))
+    var t = 0.0
+    for f in 0..<5 {
+        t = Double(f) * dt
+        _ = tr.update(observations: [obs(0.2 + 0.03 * Double(f), 0.5, 0.1, t: t)], timestamp: t)
+    }
+    let id = tr.tracks[0].id
+    for _ in 0..<15 {
+        t += dt
+        _ = tr.update(observations: [], timestamp: t)
+    }
+    // Uncapped extrapolation would predict far right (~0.8); a face near the last position
+    // must match the track, a face at the uncapped prediction must not.
+    t += dt
+    let out = tr.update(observations: [obs(0.8, 0.5, 0.1, t: t)], timestamp: t)
+    #expect(!out.contains { $0.id == id && $0.framesSinceSeen == 0 })
+}
+
+@Test func setIdentityOnUnknownOrDroppedIDIsNoOp() {
+    var tr = IoUTracker(config: TrackerConfig(maxMissedFrames: 1))
+    let id = tr.update(observations: [obs(0.5, 0.5, 0.2, t: 0)], timestamp: 0)[0].id
+    tr.setIdentity(.ambiguous, for: TrackID(9999))
+    #expect(tr.tracks[0].identity == .unknown)
+    _ = tr.update(observations: [], timestamp: dt)
+    _ = tr.update(observations: [], timestamp: 2 * dt)
+    #expect(tr.tracks.isEmpty)
+    tr.setIdentity(.ambiguous, for: id)
+    #expect(tr.tracks.isEmpty)
+    let n = tr.update(observations: [obs(0.5, 0.5, 0.2, t: 3 * dt)], timestamp: 3 * dt)
+    #expect(n[0].identity == .unknown)
+}
