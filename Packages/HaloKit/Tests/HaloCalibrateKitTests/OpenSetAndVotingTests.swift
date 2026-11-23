@@ -245,49 +245,95 @@ private let votingPolicy = MatchPolicy(minSimilarity: 0.5, minMargin: 0.1, minVo
     }
 }
 
-@Test func minVotesPicksSmallestMeetingTarget() {
-    func stats(_ n: Int, wrong: Int) -> VotingStats {
-        var s = VotingStats(policy: MatchPolicy(minSimilarity: 0.5, minMargin: 0.1, minVotes: n))
-        s.tracks = 1000
-        s.tracksEverWrong = wrong
-        return s
-    }
-    #expect(
-        Recommender.minVotes(
-            [stats(4, wrong: 0), stats(2, wrong: 5), stats(3, wrong: 1)], maxTrackFalseLabelRate: 0.001) == 3)
-    #expect(
-        Recommender.minVotes(
-            [stats(2, wrong: 9), stats(3, wrong: 4), stats(4, wrong: 4)], maxTrackFalseLabelRate: 0.001) == 4)
-    #expect(Recommender.minVotes([], maxTrackFalseLabelRate: 0.001) == nil)
+private func votingStats(_ n: Int, wrong: Int) -> VotingStats {
+    var s = VotingStats(policy: MatchPolicy(minSimilarity: 0.5, minMargin: 0.1, minVotes: n))
+    s.tracks = 1000
+    s.tracksEverWrong = wrong
+    return s
 }
 
-@Test func minMarginTakesHardestGalleryAndFallback() {
-    func gallery(_ margin: Float?) -> GalleryResult {
-        let base = OpenSetStats(policy: MatchPolicy(minSimilarity: 0.4, minMargin: margin ?? 0, minVotes: 1))
-        return GalleryResult(
-            gallerySize: 10, margins: (MarginSummary([]), MarginSummary([])),
-            suggested: margin == nil ? nil : base, atRecommended: base, atConservative: base)
-    }
-    #expect(Recommender.minMargin([gallery(0.02), gallery(0.05)], fallback: 0.3) == 0.05)
-    #expect(Recommender.minMargin([gallery(0.02), gallery(nil)], fallback: 0.3) == 0.3)
+@Test func minVotesPicksLowestRateAndPrefersMoreOnTies() {
+    // Lowest rate wins outright.
+    let lowest = [votingStats(2, wrong: 5), votingStats(3, wrong: 1), votingStats(4, wrong: 2)]
+    #expect(Recommender.minVotes(lowest, atLeast: 1) == 3)
+    // A tie goes to MORE votes (the old rule picked the fewest).
+    let tied = [votingStats(2, wrong: 4), votingStats(3, wrong: 4), votingStats(4, wrong: 4)]
+    #expect(Recommender.minVotes(tied, atLeast: 1) == 4)
+    let partialTie = [votingStats(2, wrong: 9), votingStats(3, wrong: 4), votingStats(4, wrong: 4)]
+    #expect(Recommender.minVotes(partialTie, atLeast: 1) == 4)
+    #expect(Recommender.minVotes([], atLeast: 3) == nil)
 }
 
-@Test func reportRendersPolicyAndTables() {
+@Test func minVotesNeverGoesBelowTheCurrentValue() {
+    let twoIsBest = [votingStats(2, wrong: 0), votingStats(3, wrong: 1), votingStats(4, wrong: 1)]
+    #expect(Recommender.minVotes(twoIsBest, atLeast: MatchPolicy.conservative.minVotes) == 3)
+    #expect(Recommender.minVotes(twoIsBest, atLeast: 5) == 5)
+}
+
+@Test func minMarginTakesHardestCellAndFallback() {
+    func suggestion(_ margin: Float?) -> OpenSetStats? {
+        margin.map { OpenSetStats(policy: MatchPolicy(minSimilarity: 0.4, minMargin: $0, minVotes: 1)) }
+    }
+    #expect(Recommender.minMargin([suggestion(0.02), suggestion(0.05)], fallback: 0.3) == 0.05)
+    #expect(Recommender.minMargin([suggestion(0.02), suggestion(nil)], fallback: 0.3) == 0.3)
+    #expect(Recommender.minMargin([], fallback: 0.3) == 0.3)
+}
+
+private func reportFixture(galleries: [GalleryResult], evaluated: MatchPolicy) -> String {
     let curve = VerificationCurve(
         genuineScores: [0.9, 0.8, 0.6, 0.4], impostorScores: [0.7, 0.5, 0.3, 0.2, 0.1])
     let summary = VerificationSummary(
         name: "pairs.txt", curve: curve, farTargets: [0.2, 0.001], fixedThresholds: [0.5],
         kFold: [1, 0.5])
-    let report = CalibrationReport(
+    return CalibrationReport(
         modelID: "synthetic-model", dataset: "synthetic", date: "2026-01-01", imagesReferenced: 9,
-        imagesEmbedded: 9, pairsSkipped: 0, standard: summary, extended: nil, farTarget: 0.001,
-        galleries: [], voting: [], framesPerTrack: 10,
-        recommended: MatchPolicy(minSimilarity: 0.31, minMargin: 0.05, minVotes: 3), notes: ["note"])
-    let md = report.markdown()
+        imagesEmbedded: 9, pairsSkipped: 0, galleryImages: "synthetic images", standard: summary,
+        extended: nil,
+        farTarget: 0.001, wrongLabelTarget: 0.002, galleries: galleries, voting: [], framesPerTrack: 10,
+        recommended: MatchPolicy(minSimilarity: 0.31, minMargin: 0.05, minVotes: 3), evaluated: evaluated,
+        notes: ["note"]
+    ).markdown()
+}
+
+@Test func reportRendersPolicyAndTables() {
+    let md = reportFixture(
+        galleries: [], evaluated: MatchPolicy(minSimilarity: 0.31, minMargin: 0.05, minVotes: 3))
     #expect(md.contains("`synthetic-model`"))
-    #expect(md.contains("MatchPolicy(minSimilarity: 0.31, minMargin: 0.05, minVotes: 3)"))
+    #expect(md.contains("**Derived:** `MatchPolicy(minSimilarity: 0.31, minMargin: 0.05, minVotes: 3)`"))
+    #expect(md.contains("wrong names ≤ 0.200% of probes"))
+    #expect(!md.contains("**Evaluated"))
     #expect(md.contains("| pairs.txt | 4 | 5 | 20.000% | 0.5000 | 20.0000% | 25.00% |"))
     #expect(md.contains("(below resolution)"))  // 0.1% of 5 impostors
     #expect(md.contains("accuracy: 75.00% ± 25.00%"))
     #expect(md.contains("- note"))
+}
+
+@Test func reportShowsOverridesPerCellGridAndFallbackMargin() {
+    let evaluated = MatchPolicy(minSimilarity: 0.32, minMargin: 0.2, minVotes: 3)
+    var frame = OpenSetStats(policy: evaluated)
+    frame.knownProbes = 100
+    frame.unknownProbes = 900
+    frame.correct = 80
+    frame.wrongOnUnknown = 1
+    var tracks = VotingStats(policy: evaluated)
+    tracks.tracks = 50
+    tracks.knownTracks = 10
+    tracks.knownTracksEverCorrect = 9
+    tracks.tracksEverWrong = 1
+    var fallback = OpenSetStats(policy: MatchPolicy(minSimilarity: 0.32, minMargin: 0.3, minVotes: 1))
+    fallback.knownProbes = 100
+    fallback.correct = 50
+    let similarityOnly = OpenSetStats(policy: MatchPolicy(minSimilarity: 0.32, minMargin: 0, minVotes: 1))
+    let cell = GalleryResult(
+        gallerySize: 10, enrollPerPerson: 3, margins: (MarginSummary([]), MarginSummary([])), suggested: nil,
+        fallback: fallback, atSimilarityOnly: similarityOnly, atConservative: similarityOnly,
+        atEvaluated: frame,
+        votingAtEvaluated: tracks)
+    let md = reportFixture(galleries: [cell], evaluated: evaluated)
+    #expect(
+        md.contains(
+            "**Evaluated (command-line overrides):** `MatchPolicy(minSimilarity: 0.32, minMargin: 0.20, minVotes: 3)`"
+        ))
+    #expect(md.contains("| 3 | 10 | 100 | 900 | 0.1000% (1) | 80.00% | 50 | 2.000% (1) | 90.00% |"))
+    #expect(md.contains("none; fallback 0.30 | 0.0000% / 50.00% |"))
 }

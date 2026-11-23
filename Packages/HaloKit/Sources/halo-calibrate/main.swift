@@ -14,13 +14,22 @@ import ImageIO
 let usage = """
     usage: halo-calibrate run --model <HaloFaceEmbedder.mlmodelc> --pairs <pairs.txt> --images <lfw dir>
                               [--report <out.md>] [--gallery-sizes 10,50,200] [--frames 10]
-                              [--tracks-per-identity 5] [--seed 42] [--far 0.001] [--limit <images>]
+                              [--tracks-per-identity 5] [--seed 42] [--limit <images>]
+                              [--far 0.001] [--max-wrong-label-rate 0.001]
+                              [--enroll-per-person 1[,3,5]] [--gallery-images pairs|all]
+                              [--min-similarity <x>] [--min-margin <y>] [--min-votes <n>]
 
     Detects (Apple Vision) and embeds (CoreML) every image the pair list references, then reports:
       - ROC points, FAR/FRR, and the lowest threshold with FAR <= 0.1% and <= 0.01%, on the standard
         pairs and on all cross-identity pairs of the embedded images (finer FAR resolution);
       - top-1 vs top-2 margin distributions for simulated galleries of N identities, and minMargin;
-      - TrackVoter false-label rates for minVotes 2...4 on same-identity image sequences.
+      - TrackVoter false-label rates for minVotes 2...4 on same-identity image sequences;
+      - wrong-label rate and recall per gallery cell at the evaluated policy.
+
+    --far sets minSimilarity (pair false-accept target); --max-wrong-label-rate sets minMargin (wrong
+    names per probe). --min-similarity/--min-margin/--min-votes override the derived values for the
+    evaluated policy. --enroll-per-person takes a list; every value x every gallery size is one cell.
+    --gallery-images all also embeds every LFW image (not just pairs.txt ones) for the galleries.
     Skips (exit 0) when the model or dataset is absent.
     """
 
@@ -34,7 +43,13 @@ struct Options {
     var tracksPerIdentity = 5
     var seed: UInt64 = 42
     var far = 0.001
+    var wrongLabelTarget = 0.001
     var limit: Int?
+    var enrollPerPerson = [1]
+    var allImages = false
+    var minSimilarity: Float?
+    var minMargin: Float?
+    var minVotes: Int?
 }
 
 func fail(_ message: String) -> Never {
@@ -68,6 +83,30 @@ func parseOptions(_ args: [String]) -> Options {
         case "--seed": options.seed = UInt64(value()) ?? options.seed
         case "--far": options.far = Double(value()) ?? options.far
         case "--limit": options.limit = Int(value())
+        case "--max-wrong-label-rate":
+            guard let v = Double(value()), v >= 0, v <= 1 else {
+                fail("--max-wrong-label-rate must be in 0...1")
+            }
+            options.wrongLabelTarget = v
+        case "--enroll-per-person":
+            let list = value().split(separator: ",").compactMap { Int($0) }.filter { $0 > 0 }
+            guard !list.isEmpty else { fail("--enroll-per-person needs positive integers, e.g. 1,3,5") }
+            options.enrollPerPerson = list
+        case "--gallery-images":
+            switch value() {
+            case "pairs": options.allImages = false
+            case "all": options.allImages = true
+            default: fail("--gallery-images must be pairs or all")
+            }
+        case "--min-similarity":
+            guard let v = Float(value()), v >= -1, v <= 1 else { fail("--min-similarity must be in -1...1") }
+            options.minSimilarity = v
+        case "--min-margin":
+            guard let v = Float(value()), v >= 0, v <= 2 else { fail("--min-margin must be in 0...2") }
+            options.minMargin = v
+        case "--min-votes":
+            guard let v = Int(value()), v >= 1 else { fail("--min-votes must be >= 1") }
+            options.minVotes = v
         case "-h", "--help":
             print(usage)
             exit(0)
@@ -124,6 +163,16 @@ func embedAll(_ refs: [LFWImageRef], root: URL, embedder: CoreMLFaceEmbedder) as
     return result
 }
 
+/// Every `<name>/<name>_<nnnn>.jpg` under the LFW root, sorted.
+func allImageRefs(in root: URL) -> [LFWImageRef] {
+    let fm = FileManager.default
+    let people = (try? fm.contentsOfDirectory(atPath: root.path)) ?? []
+    return people.flatMap { person in
+        ((try? fm.contentsOfDirectory(atPath: root.appendingPathComponent(person).path)) ?? [])
+            .compactMap { LFWImageRef(directory: person, fileName: $0) }
+    }.sorted()
+}
+
 func dot(_ a: [Float], _ b: [Float]) -> Float {
     zip(a, b).reduce(0) { $0 + $1.0 * $1.1 }
 }
@@ -170,7 +219,10 @@ func run(_ options: Options) async {
         scored.append(ScoredPair(score: dot(a, b), isGenuine: pair.isGenuine, fold: pair.fold))
     }
     let farTargets = [0.01, 0.001, 0.0001]
-    let fixed: [Float] = [0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.55]
+    // Fixed ROC points, plus the overridden minSimilarity so its FAR/FRR are reported too.
+    let fixed = Array(
+        Set([0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.55] + [options.minSimilarity].compactMap { $0 })
+    ).sorted()
     let standard = VerificationSummary(
         name: "pairs.txt", curve: VerificationCurve(pairs: scored), farTargets: farTargets,
         fixedThresholds: fixed, kFold: VerificationCurve.kFoldAccuracy(scored))
@@ -189,60 +241,118 @@ func run(_ options: Options) async {
         let thresholdPoint = extendedCurve.threshold(forFAR: options.far)
             ?? standard.point(forFAR: options.far)
     else { fail("no impostor pairs; cannot pick a threshold") }
-    let minSimilarity = Recommender.roundUpToHundredth(thresholdPoint.threshold)
+    let derivedSimilarity = Recommender.roundUpToHundredth(thresholdPoint.threshold)
+    let minSimilarity = options.minSimilarity ?? derivedSimilarity
 
-    // 3. Open-set gallery emulation.
-    let labeled = embedded.map { LabeledEmbedding(identity: $0.name, vector: vectors[$0] ?? []) }
+    // 3. Open-set gallery emulation: one cell per (enrollment images per person, gallery size).
+    var galleryVectors = vectors
+    var galleryImages = "the \(vectors.count) `pairs.txt` images"
+    if options.allImages {
+        let extra = allImageRefs(in: imagesURL).filter { vectors[$0] == nil }
+        log("  embedding \(extra.count) more images for galleries")
+        galleryVectors.merge(await embedAll(extra, root: imagesURL, embedder: embedder)) { a, _ in a }
+        galleryImages = "all \(galleryVectors.count) embedded LFW images"
+    }
+    let labeled = galleryVectors.keys.sorted().map {
+        LabeledEmbedding(identity: $0.name, vector: galleryVectors[$0] ?? [])
+    }
     let marginGrid = stride(from: 0, through: 30, by: 1).map { Float($0) / 100 }
-    var galleries: [GalleryResult] = []
-    var hardestScores: [ProbeScore] = []
-    for size in options.gallerySizes.sorted() {
-        let split = OpenSetSimulation.split(labeled, gallerySize: size, seed: options.seed)
-        guard split.enrolled.count > 1 else { continue }
-        let scores = OpenSetSimulation.score(split)
-        let suggested = OpenSetSimulation.suggestMinMargin(
-            scores, minSimilarity: minSimilarity, maxFalseLabelRate: options.far, candidates: marginGrid)
-        let atSimilarityOnly = OpenSetSimulation.evaluate(
-            scores, policy: MatchPolicy(minSimilarity: minSimilarity, minMargin: 0, minVotes: 1))
-        galleries.append(
-            GalleryResult(
-                gallerySize: split.enrolled.count,
-                margins: OpenSetSimulation.marginSummaries(scores, minSimilarity: minSimilarity),
-                suggested: suggested, atRecommended: atSimilarityOnly,
-                atConservative: OpenSetSimulation.evaluate(scores, policy: .conservative)))
-        hardestScores = scores
-        log("  gallery \(split.enrolled.count): \(scores.count) probes")
+    let fallbackMargin = marginGrid.last ?? 0.3
+    struct Cell {
+        var enroll: Int
+        var size: Int
+        var scores: [ProbeScore]
+        var tracks: [SimulatedTrack]
+        var suggested: OpenSetStats?
     }
-    let minMargin = Recommender.minMargin(galleries, fallback: marginGrid.last ?? 0.3)
+    var cells: [Cell] = []
+    for enroll in options.enrollPerPerson {
+        for size in options.gallerySizes.sorted() {
+            let split = OpenSetSimulation.split(
+                labeled, gallerySize: size, enrollPerPerson: enroll, seed: options.seed)
+            guard split.enrolled.count > 1 else { continue }
+            let scores = OpenSetSimulation.score(split)
+            cells.append(
+                Cell(
+                    enroll: enroll, size: split.enrolled.count, scores: scores,
+                    tracks: VotingSimulation.makeTracks(
+                        scores, framesPerTrack: options.frames, tracksPerIdentity: options.tracksPerIdentity,
+                        seed: options.seed),
+                    suggested: OpenSetSimulation.suggestMinMargin(
+                        scores, minSimilarity: minSimilarity, maxFalseLabelRate: options.wrongLabelTarget,
+                        candidates: marginGrid)))
+            log("  gallery \(split.enrolled.count) x \(enroll) enrolled: \(scores.count) probes")
+        }
+    }
+    guard !cells.isEmpty else { fail("no gallery could be built (too few identities with enough images)") }
+    let derivedMargin = Recommender.minMargin(cells.map(\.suggested), fallback: fallbackMargin)
+    let minMargin = options.minMargin ?? derivedMargin
 
-    // 4. Per-track voting on the largest gallery.
-    let tracks = VotingSimulation.makeTracks(
-        hardestScores, framesPerTrack: options.frames, tracksPerIdentity: options.tracksPerIdentity,
-        seed: options.seed)
-    let voting = (2...4).map {
-        VotingSimulation.simulate(
-            tracks, policy: MatchPolicy(minSimilarity: minSimilarity, minMargin: minMargin, minVotes: $0))
+    // 4. Per-track voting, minVotes 2...4, on the largest gallery of each enrollment count.
+    var voting: [VotingResult] = []
+    for enroll in options.enrollPerPerson {
+        guard let cell = cells.filter({ $0.enroll == enroll }).max(by: { $0.size < $1.size }) else {
+            continue
+        }
+        for votes in 2...4 {
+            voting.append(
+                VotingResult(
+                    gallerySize: cell.size, enrollPerPerson: enroll,
+                    stats: VotingSimulation.simulate(
+                        cell.tracks,
+                        policy: MatchPolicy(
+                            minSimilarity: minSimilarity, minMargin: minMargin, minVotes: votes))))
+        }
     }
-    let minVotes = Recommender.minVotes(voting, maxTrackFalseLabelRate: options.far) ?? 3
+    // The hardest case decides: per minVotes, the worst track rate over enrollment counts.
+    let worstPerVotes = (2...4).compactMap { votes in
+        voting.filter { $0.stats.policy.minVotes == votes }.map(\.stats)
+            .max { $0.trackFalseLabelRate < $1.trackFalseLabelRate }
+    }
+    let currentVotes = MatchPolicy.conservative.minVotes
+    let derivedVotes = Recommender.minVotes(worstPerVotes, atLeast: currentVotes) ?? currentVotes
+    let evaluated = MatchPolicy(
+        minSimilarity: minSimilarity, minMargin: minMargin, minVotes: options.minVotes ?? derivedVotes)
+
+    let galleries = cells.map { cell in
+        GalleryResult(
+            gallerySize: cell.size, enrollPerPerson: cell.enroll,
+            margins: OpenSetSimulation.marginSummaries(cell.scores, minSimilarity: minSimilarity),
+            suggested: cell.suggested,
+            fallback: cell.suggested == nil
+                ? OpenSetSimulation.evaluate(
+                    cell.scores,
+                    policy: MatchPolicy(minSimilarity: minSimilarity, minMargin: fallbackMargin, minVotes: 1))
+                : nil,
+            atSimilarityOnly: OpenSetSimulation.evaluate(
+                cell.scores, policy: MatchPolicy(minSimilarity: minSimilarity, minMargin: 0, minVotes: 1)),
+            atConservative: OpenSetSimulation.evaluate(cell.scores, policy: .conservative),
+            atEvaluated: OpenSetSimulation.evaluate(cell.scores, policy: evaluated),
+            votingAtEvaluated: VotingSimulation.simulate(cell.tracks, policy: evaluated))
+    }
 
     let formatter = ISO8601DateFormatter()
     formatter.formatOptions = [.withFullDate]
+    let far = CalibrationReportFormat.pct(options.far)
+    let wrong = CalibrationReportFormat.pct(options.wrongLabelTarget)
     let report = CalibrationReport(
         modelID: embedder.space.modelID,
         dataset: "LFW (`pairs.txt`, \(pairs.count) pairs)",
         date: formatter.string(from: Date()),
         imagesReferenced: refs.count, imagesEmbedded: vectors.count, pairsSkipped: skipped,
-        standard: standard, extended: extended, farTarget: options.far, galleries: galleries,
-        voting: voting, framesPerTrack: options.frames,
-        recommended: MatchPolicy(minSimilarity: minSimilarity, minMargin: minMargin, minVotes: minVotes),
+        galleryImages: galleryImages, standard: standard, extended: extended, farTarget: options.far,
+        wrongLabelTarget: options.wrongLabelTarget, galleries: galleries, voting: voting,
+        framesPerTrack: options.frames,
+        recommended: MatchPolicy(
+            minSimilarity: derivedSimilarity, minMargin: derivedMargin, minVotes: derivedVotes),
+        evaluated: evaluated,
         notes: [
-            "minSimilarity: lowest threshold with FAR ≤ \(CalibrationReportFormat.pct(options.far)) on "
-                + "the all-pairs set, rounded up to 0.01.",
-            "minMargin: smallest grid value (0.00…0.30) keeping the per-frame false-label rate ≤ "
-                + "\(CalibrationReportFormat.pct(options.far)) in every gallery size, rounded up to 0.01.",
-            "minVotes: smallest of 2…4 with track false-label rate ≤ \(CalibrationReportFormat.pct(options.far)) "
-                + "(else the lowest-rate one); tracks sample one identity's images with replacement, "
-                + "seed \(options.seed).",
+            "minSimilarity: lowest threshold with pair FAR ≤ \(far) on the all-pairs set, rounded up to 0.01.",
+            "minMargin: smallest grid value (0.00…0.30) keeping wrong names ≤ \(wrong) of probes at the "
+                + "evaluated minSimilarity in every cell, rounded up to 0.01 (a cell with none uses 0.30).",
+            "minVotes: lowest worst-cell track false-label rate among 2…4, ties to more votes, never below "
+                + "the current \(currentVotes). Tracks sample one identity's images with replacement, "
+                + "seed \(options.seed), \(options.tracksPerIdentity) tracks per identity.",
         ])
     let markdown = report.markdown()
     print(markdown)

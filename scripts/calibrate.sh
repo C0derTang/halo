@@ -7,7 +7,8 @@
 # halo-calibrate at personal photos.
 #
 # Usage: ./scripts/calibrate.sh [--download-only] [extra halo-calibrate options]
-#   e.g. ./scripts/calibrate.sh --gallery-sizes 10,50,200 --frames 10
+#   e.g. ./scripts/calibrate.sh --gallery-sizes 10,50,200 --enroll-per-person 1,3,5 --gallery-images all
+#        ./scripts/calibrate.sh --min-similarity 0.32 --min-margin 0.20 --min-votes 3   (evaluate a policy)
 #
 # Output: the Markdown results table on stdout and in Models/calibration/report.md (paste it into
 # docs/MODELS.md). Skips (exit 0) when the model is absent: run scripts/fetch-models.sh first.
