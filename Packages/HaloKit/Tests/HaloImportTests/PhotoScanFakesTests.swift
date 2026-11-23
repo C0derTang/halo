@@ -23,8 +23,13 @@ actor PhotoScanFakeStore: PeopleStoring, EnrollmentStoring {
     var identityMutations: [String] = []
     /// 1-based cursor write that throws (simulates the process dying before it lands).
     var failCursorWrite: Int?
+    /// The next this-many `replaceClusters` calls throw (e.g. a concurrent confirm/forget).
+    var failReplaceClusters = 0
 
     struct SimulatedKill: Error {}
+    struct ClusterConflict: Error {}
+
+    func setFailReplaceClusters(_ n: Int) { failReplaceClusters = n }
 
     func seed(people: [Person] = [], embeddings: [FaceEmbedding] = [], clusters: [ClusterRecord] = []) {
         for p in people { self.people[p.id] = p }
@@ -65,9 +70,54 @@ actor PhotoScanFakeStore: PeopleStoring, EnrollmentStoring {
         let wanted = Set(ids)
         return embeddings.filter { wanted.contains($0.id) }
     }
+    /// Validating: rejects records whose members are not all distinct, existing, unassigned
+    /// embeddings, or whose suggested person is not an existing confirmed person.
     func replaceClusters(_ clusters: [ClusterRecord]) async throws {
         replaceClustersCalls += 1
+        if let assignee = interfereOnNextReplace {
+            interfereOnNextReplace = nil
+            simulateConcurrentUserActions(against: clusters, assigningTo: assignee)
+        }
+        if failReplaceClusters > 0 {
+            failReplaceClusters -= 1
+            throw ClusterConflict()
+        }
+        let unassigned = Set(embeddings.filter { $0.personID == nil }.map(\.id))
+        var seen: Set<UUID> = []
+        for c in clusters {
+            for m in c.memberIDs {
+                guard unassigned.contains(m), seen.insert(m).inserted else { throw ClusterConflict() }
+            }
+            if let p = c.suggestedPersonID, people[p]?.confirmed != true { throw ClusterConflict() }
+        }
         clusterRecords = clusters
+        clusterHistory.append(clusters)
+    }
+
+    /// Every successfully stored set of cluster records, in order.
+    var clusterHistory: [[ClusterRecord]] = []
+
+    /// When set, the next `replaceClusters` first acts like the user racing the scan (on the first
+    /// suggested cluster: confirm one member as this person, reject another, forget the suggested
+    /// person), so the records being written are stale.
+    var interfereOnNextReplace: PersonID?
+
+    func setInterfereOnNextReplace(_ assignee: PersonID?) { interfereOnNextReplace = assignee }
+
+    private func simulateConcurrentUserActions(
+        against clusters: [ClusterRecord], assigningTo assignee: PersonID
+    ) {
+        guard let target = clusters.first(where: { $0.suggestedPersonID != nil }) ?? clusters.first,
+            target.memberIDs.count >= 2
+        else { return }
+        if let i = embeddings.firstIndex(where: { $0.id == target.memberIDs[0] }) {
+            embeddings[i].personID = assignee
+        }
+        embeddings.removeAll { $0.id == target.memberIDs[1] }
+        if let forgotten = target.suggestedPersonID {
+            people[forgotten] = nil
+            embeddings.removeAll { $0.personID == forgotten }
+        }
     }
     func clusters() async throws -> [ClusterRecord] { clusterRecords }
     func confirm(cluster id: String, as person: PersonID) async throws { identityMutations.append("confirm") }

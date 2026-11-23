@@ -3,7 +3,6 @@ import Foundation
 import HaloCore
 import ImageIO
 import Testing
-import UniformTypeIdentifiers
 
 @testable import HaloImport
 
@@ -78,21 +77,6 @@ private func pageAll(limit: Int) -> [PhotoAsset] {
         #expect(await library.loadedIdentifiers == ["asset-0", "asset-1"])
     }
 
-    @Test func decodingDownscalesTheLongEdgeWithoutRotating() throws {
-        let data = NSMutableData()
-        let dest = try #require(
-            CGImageDestinationCreateWithData(data as CFMutableData, UTType.png.identifier as CFString, 1, nil)
-        )
-        CGImageDestinationAddImage(dest, F.image(width: 2000, height: 1000), nil)
-        #expect(CGImageDestinationFinalize(dest))
-
-        let image = try #require(PhotoScanImageDecoding.downscaled(data as Data, maxPixelSize: 1024))
-        #expect(image.width == 1024)
-        #expect(image.height == 512)
-        #expect(PhotoScanImageDecoding.downscaled(Data([0, 1, 2, 3]), maxPixelSize: 1024) == nil)
-        #expect(PhotoScanImageDecoding.downscaled(data as Data, maxPixelSize: 0) == nil)
-    }
-
     @Test func cursorRoundTripsAndFallsBackToFresh() throws {
         let space = EmbeddingSpace(modelID: "m", dimension: 8)
         var cursor = PhotoScanCursor(space: space)
@@ -107,11 +91,27 @@ private func pageAll(limit: Int) -> [PhotoAsset] {
         #expect(PhotoScanCursor.decode(encoded, space: other) == PhotoScanCursor(space: other))
     }
 
+    @Test func requestTargetFitsTheLongEdgeAndNeverUpscales() {
+        #expect(
+            PhotoScanImageSizing.targetSize(pixelWidth: 4032, pixelHeight: 3024, maxPixelSize: 1024)
+                == CGSize(width: 1024, height: 768))
+        #expect(
+            PhotoScanImageSizing.targetSize(pixelWidth: 3024, pixelHeight: 4032, maxPixelSize: 1024)
+                == CGSize(width: 768, height: 1024))
+        #expect(
+            PhotoScanImageSizing.targetSize(pixelWidth: 640, pixelHeight: 480, maxPixelSize: 1024)
+                == CGSize(width: 640, height: 480))
+        #expect(
+            PhotoScanImageSizing.targetSize(pixelWidth: 0, pixelHeight: 0, maxPixelSize: 1024)
+                == CGSize(width: 1024, height: 1024))
+    }
+
     #if canImport(Photos)
         /// Builds request options only; never touches the Photos library.
-        @Test func photoKitRequestsNeverUseTheNetwork() {
+        @Test func photoKitRequestsAreLocalOnlyBestQuality() {
             let options = PhotoKitLibrarySource.requestOptions()
             #expect(options.isNetworkAccessAllowed == false)
+            #expect(options.deliveryMode == .highQualityFormat)
             #expect(options.isSynchronous == false)
             #expect(options.version == .current)
         }

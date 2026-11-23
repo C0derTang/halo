@@ -15,13 +15,20 @@ public struct PhotoScanConfig: Hashable, Sendable {
     public var minFaceQuality: Float
     /// Faces whose shorter box side is below this many upright pixels are not embedded.
     public var minFacePixels: Double
-    /// Abort the run after this many consecutive detector (or embedder) failures: a systemic fault
-    /// (e.g. no model) must not silently advance the cursor past the whole library.
+    /// Abort the run after this many consecutive *assets* failed entirely (detection failed, or
+    /// every eligible face failed to embed). Counted per asset, so one crowd photo counts once;
+    /// any embedded face resets it. Only a systemic fault (e.g. no model) fails asset after asset,
+    /// and it must not silently advance the cursor past the whole library. Errors the job's
+    /// `isSystemicFailure` recognizes abort immediately instead.
     public var maxConsecutiveFailures: Int
+    /// Attempts per clustering round (fresh read -> cluster -> replace). A mid-pass round that
+    /// exhausts them is skipped with a warning; only the end-of-pass round then throws.
+    public var clusteringAttempts: Int
 
     public init(
         batchSize: Int = 25, clusterEveryBatches: Int = 20, maxPixelSize: Int = 1024,
-        minFaceQuality: Float = 0.3, minFacePixels: Double = 40, maxConsecutiveFailures: Int = 8
+        minFaceQuality: Float = 0.3, minFacePixels: Double = 40, maxConsecutiveFailures: Int = 8,
+        clusteringAttempts: Int = 3
     ) {
         self.batchSize = batchSize
         self.clusterEveryBatches = clusterEveryBatches
@@ -29,6 +36,7 @@ public struct PhotoScanConfig: Hashable, Sendable {
         self.minFaceQuality = minFaceQuality
         self.minFacePixels = minFacePixels
         self.maxConsecutiveFailures = maxConsecutiveFailures
+        self.clusteringAttempts = clusteringAttempts
     }
 }
 
@@ -55,6 +63,17 @@ public struct ScanProgress: Hashable, Sendable {
     public var batchesCompleted = 0
     /// Cluster suggestions stored by the latest clustering, nil until clustering has run.
     public var clusterCount: Int?
+    /// Clustering rounds this run that failed every attempt (scanning continued regardless).
+    public var clusteringFailures = 0
+    /// Set while the latest clustering round failed; cleared when a later round succeeds.
+    /// Carries no error text, ids or vectors (invariant 2).
+    public var warning: Warning?
+
+    public enum Warning: Hashable, Sendable {
+        /// Suggestions could not be refreshed (e.g. the user confirmed or forgot someone mid-write);
+        /// the next clustering round retries.
+        case clusteringFailed
+    }
 
     public init() {}
 }
@@ -115,6 +134,11 @@ struct PhotoScanCursor: Codable, Hashable, Sendable {
 /// Cancellation is checked before each asset; on cancellation the finished part of the batch is
 /// persisted (best effort) and `run()` throws `CancellationError`.
 ///
+/// Failures: `isSystemicFailure` classifies detector/embedder errors that mean the pipeline cannot
+/// work at all (the app passes HaloVision's `isRecognitionUnavailable`); those abort the run at
+/// once. Any other per-asset or per-face error skips that asset or face (see
+/// `PhotoScanConfig.maxConsecutiveFailures` for the fallback).
+///
 /// Single use: observe `progress`, call `run()` once (e.g. in a `Task` you can cancel).
 public actor PhotoScanJob {
     /// Progress snapshots; finishes when `run()` returns or throws.
@@ -133,14 +157,16 @@ public actor PhotoScanJob {
     private var state = ScanProgress()
     /// `sourceRef`s of photo-library assets that already have embeddings in this space.
     private var embeddedRefs: Set<String> = []
-    private var detectFailures = 0
-    private var embedFailures = 0
+    private let isSystemicFailure: @Sendable (any Error) -> Bool
+    /// Assets in a row that failed entirely (see `PhotoScanConfig.maxConsecutiveFailures`).
+    private var consecutiveFailedAssets = 0
 
     public init(
         source: any PhotoLibrarySource, detector: any FaceDetecting, embedder: any FaceEmbedder,
         store: any PeopleStoring & EnrollmentStoring, clusterer: FaceClusterer,
         config: PhotoScanConfig = PhotoScanConfig(),
-        uprighter: any PhotoScanUprighting = CoreImageUprighter()
+        uprighter: any PhotoScanUprighting = CoreImageUprighter(),
+        isSystemicFailure: @escaping @Sendable (any Error) -> Bool = { _ in false }
     ) {
         (progress, continuation) = AsyncStream.makeStream(
             of: ScanProgress.self, bufferingPolicy: .bufferingNewest(256))
@@ -151,6 +177,7 @@ public actor PhotoScanJob {
         self.clusterer = clusterer
         self.config = config
         self.uprighter = uprighter
+        self.isSystemicFailure = isSystemicFailure
     }
 
     /// Scans from the stored cursor to the end of the pass, then re-clusters. Returns the final
@@ -199,7 +226,7 @@ public actor PhotoScanJob {
                 if !passComplete, config.clusterEveryBatches > 0,
                     state.batchesCompleted % config.clusterEveryBatches == 0
                 {
-                    try await recluster(space: space)
+                    try await reclusterWithRetry(space: space, endOfPass: false)
                 }
             }
         }
@@ -210,7 +237,7 @@ public actor PhotoScanJob {
         try await store.setScanCursor(cursor.encoded())
 
         try Task.checkCancellation()
-        try await recluster(space: space)
+        try await reclusterWithRetry(space: space, endOfPass: true)
         publish(.finished)
         return state
     }
@@ -251,18 +278,18 @@ public actor PhotoScanJob {
             image = try uprighter.upright(loaded.image, orientation: loaded.orientation)
             faces = try await detector.detectFaces(
                 in: image, timestamp: asset.creationDate.timeIntervalSinceReferenceDate)
-            detectFailures = 0
         } catch is CancellationError {
             throw CancellationError()
         } catch {
+            if isSystemicFailure(error) { throw error }
             state.assetsFailed += 1
-            detectFailures += 1
-            if detectFailures >= max(config.maxConsecutiveFailures, 1) { throw error }
+            try assetFailed(error)
             return []
         }
         state.assetsScanned += 1
 
         var embeddings: [FaceEmbedding] = []
+        var lastFaceError: (any Error)?
         for face in faces {
             guard accepts(face, imageWidth: image.width, imageHeight: image.height) else {
                 state.facesRejected += 1
@@ -271,7 +298,6 @@ public actor PhotoScanJob {
             do {
                 let vector = try await embedder.embed(face: face, in: image)
                 guard Self.isUsable(vector, space: space) else { throw PhotoScanError.invalidEmbedding }
-                embedFailures = 0
                 embeddings.append(
                     FaceEmbedding(
                         personID: nil, space: space, vector: vector, source: .photoLibrary, sourceRef: ref,
@@ -279,13 +305,25 @@ public actor PhotoScanJob {
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
+                if isSystemicFailure(error) { throw error }
                 state.facesFailed += 1
-                embedFailures += 1
-                if embedFailures >= max(config.maxConsecutiveFailures, 1) { throw error }
+                lastFaceError = error
             }
         }
-        if !embeddings.isEmpty { embeddedRefs.insert(ref) }
+        if !embeddings.isEmpty {
+            embeddedRefs.insert(ref)
+            consecutiveFailedAssets = 0
+        } else if let lastFaceError {
+            try assetFailed(lastFaceError)
+        }
+        // An asset with no eligible faces says nothing about the pipeline: no count, no reset.
         return embeddings
+    }
+
+    /// Counts an asset that failed entirely; rethrows once too many fail in a row.
+    private func assetFailed(_ error: any Error) throws {
+        consecutiveFailedAssets += 1
+        if consecutiveFailedAssets >= max(config.maxConsecutiveFailures, 1) { throw error }
     }
 
     /// Quality / size filter, in upright pixel space.
@@ -310,18 +348,50 @@ public actor PhotoScanJob {
         try await store.setScanCursor(cursor.encoded())
     }
 
-    /// Clusters every unassigned embedding in this space and replaces the stored suggestions.
-    /// Suggestions name the closest confirmed person at most; nothing is assigned (invariant 3).
-    private func recluster(space: EmbeddingSpace) async throws {
+    /// Runs a clustering round, retrying it whole: every attempt re-reads unassigned embeddings,
+    /// stored clusters and the confirmed gallery, because the user may have confirmed, rejected or
+    /// forgotten someone between the read and `replaceClusters`.
+    ///
+    /// Mid-pass rounds are incremental (`FaceClusterer.assign`: existing cluster ids and members
+    /// stay put) and never end the scan: once attempts run out they are recorded in
+    /// `ScanProgress` and the next round retries. The end-of-pass round re-clusters everything and
+    /// throws its last error if every attempt fails. Cancellation always propagates.
+    private func reclusterWithRetry(space: EmbeddingSpace, endOfPass: Bool) async throws {
+        var lastError: (any Error)?
+        for _ in 0..<max(config.clusteringAttempts, 1) {
+            do {
+                try await recluster(space: space, full: endOfPass)
+                state.warning = nil
+                publish(.scanning)
+                return
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                try Task.checkCancellation()
+                lastError = error
+            }
+        }
+        state.clusteringFailures += 1
+        state.warning = .clusteringFailed
+        publish(.scanning)
+        if endOfPass, let lastError { throw lastError }
+    }
+
+    /// One clustering attempt. Stores suggestions only: each names the closest confirmed person at
+    /// most and nothing is assigned (invariant 3).
+    private func recluster(space: EmbeddingSpace, full: Bool) async throws {
         publish(.clustering)
         let unassigned = try await store.unassignedEmbeddings(space: space)
             .filter { $0.personID == nil && $0.space == space }
-        let result = try clusterer.cluster(unassigned)
+        let clusters =
+            full
+            ? try clusterer.cluster(unassigned).clusters
+            : try await incrementalClusters(unassigned: unassigned, space: space)
         let gallery = try await store.confirmedGallery(space: space)
             .filter { $0.personID != nil && $0.space == space }
         var records: [ClusterRecord] = []
-        records.reserveCapacity(result.clusters.count)
-        for cluster in result.clusters {
+        records.reserveCapacity(clusters.count)
+        for cluster in clusters {
             let suggestion = try clusterer.suggest(for: cluster, confirmedGallery: gallery)
             records.append(
                 ClusterRecord(
@@ -331,7 +401,64 @@ public actor PhotoScanJob {
         }
         try await store.replaceClusters(records)
         state.clusterCount = records.count
-        publish(.scanning)
+    }
+
+    /// Keeps every stored cluster whose members are all still unassigned, and attaches the other
+    /// unassigned faces to them (or clusters them among themselves). A cluster that lost a member
+    /// (confirmed, rejected or forgotten in the meantime) is dropped and its remaining faces are
+    /// treated as new.
+    private func incrementalClusters(unassigned: [FaceEmbedding], space: EmbeddingSpace) async throws
+        -> [FaceCluster]
+    {
+        let byID = Dictionary(unassigned.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        var existing: [FaceCluster] = []
+        var claimed: Set<UUID> = []
+        var pool: [FaceEmbedding] = []
+        for record in try await store.clusters() {
+            let ids = Set(record.memberIDs)
+            let members = record.memberIDs.compactMap { byID[$0] }
+            guard let id = UUID(uuidString: record.id), !members.isEmpty, ids.count == members.count,
+                members.count == record.memberIDs.count, ids.isDisjoint(with: claimed),
+                ids.contains(record.representativeID),
+                let cluster = try restoredCluster(record, id: id, members: members, space: space)
+            else { continue }
+            existing.append(cluster)
+            claimed.formUnion(ids)
+            pool += members
+        }
+        let fresh = unassigned.filter { !claimed.contains($0.id) }
+        return try clusterer.assign(newEmbeddings: fresh, to: existing, existingEmbeddings: pool).clusters
+    }
+
+    /// Rebuilds a `FaceCluster` for an intact stored record (id, members, representative and
+    /// cohesion as stored; centroid recomputed from the members).
+    ///
+    /// `FaceCluster` has no public initializer, so the clusterer produces a single-member cluster of
+    /// the first member and its public fields are overwritten. Swap for an initializer once
+    /// HaloClustering exposes one.
+    private func restoredCluster(
+        _ record: ClusterRecord, id: UUID, members: [FaceEmbedding], space: EmbeddingSpace
+    ) throws -> FaceCluster? {
+        let seeder = FaceClusterer(config: ClusteringConfig(minClusterSize: 1, minQuality: -.infinity))
+        guard var cluster = try seeder.cluster([members[0]]).clusters.first else { return nil }
+        var sum = [Float](repeating: 0, count: space.dimension)
+        for member in members {
+            let unit = Self.normalized(member.vector)
+            for d in 0..<space.dimension { sum[d] += unit[d] }
+        }
+        cluster.id = id
+        cluster.space = space
+        cluster.memberIDs = record.memberIDs.sorted { $0.uuidString < $1.uuidString }
+        cluster.representativeID = record.representativeID
+        cluster.cohesion = record.cohesion
+        cluster.centroid = Self.normalized(sum)
+        return cluster
+    }
+
+    private static func normalized(_ v: [Float]) -> [Float] {
+        let norm = v.reduce(0) { $0 + $1 * $1 }.squareRoot()
+        guard norm > 0, norm.isFinite else { return v }
+        return v.map { $0 / norm }
     }
 
     private func publish(_ phase: ScanProgress.Phase) {

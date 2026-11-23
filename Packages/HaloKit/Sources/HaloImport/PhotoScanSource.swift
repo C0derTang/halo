@@ -44,8 +44,9 @@ public protocol PhotoLibrarySource: Sendable {
     /// the newest asset when `position` is nil. An empty result means the library is exhausted.
     func assets(after position: PhotoAsset?, limit: Int) async throws -> [PhotoAsset]
 
-    /// The asset's locally available pixels, downscaled so the long edge is at most `maxPixelSize`,
-    /// or nil when they are not on the device. Never touches the network.
+    /// The asset's best locally available pixels, downscaled so the long edge is about
+    /// `maxPixelSize`, or nil when nothing usable is on the device (the scan skips the asset).
+    /// Never touches the network.
     func loadImage(for asset: PhotoAsset, maxPixelSize: Int) async throws -> PhotoScanImage?
 }
 
