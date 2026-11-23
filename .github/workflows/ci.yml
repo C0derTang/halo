@@ -5,7 +5,8 @@ on:
     branches: [main]
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # Only cancel superseded PR runs; every push to main must be checked.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   checks:
     runs-on: macos-latest
@@ -13,7 +14,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Select latest Xcode
-        run: sudo xcode-select -s "$(ls -d /Applications/Xcode*.app | sort -V | tail -1)" && xcodebuild -version
+        run: |
+          ls -d /Applications/Xcode*.app
+          sudo xcode-select -s "$(ls -d /Applications/Xcode*.app | sort -V | tail -1)"
+          xcodebuild -version && swift --version
       - name: Install xcodegen
         run: brew install xcodegen
       - uses: actions/cache@v4
