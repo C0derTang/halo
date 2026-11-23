@@ -4,6 +4,21 @@ import Testing
 
 // Synthetic pair lists in the LFW format; the names are made up.
 
+@Test func imageRefFromDirectoryListing() {
+    #expect(
+        LFWImageRef(directory: "Person_A", fileName: "Person_A_0012.jpg")
+            == LFWImageRef(name: "Person_A", number: 12))
+    #expect(LFWImageRef(directory: "Person_A", fileName: "Person_B_0001.jpg") == nil)
+    #expect(LFWImageRef(directory: "Person_A", fileName: "Person_A_0001.png") == nil)
+    #expect(LFWImageRef(directory: "Person_A", fileName: "Person_A_.jpg") == nil)
+    #expect(LFWImageRef(directory: "Person_A", fileName: "Person_A_0000.jpg") == nil)
+    #expect(LFWImageRef(directory: "Person_A", fileName: ".DS_Store") == nil)
+    // Round trip with the path the pair list uses.
+    let ref = LFWImageRef(name: "Person_A", number: 3)
+    let parts = ref.relativePath.split(separator: "/").map(String.init)
+    #expect(LFWImageRef(directory: parts[0], fileName: parts[1]) == ref)
+}
+
 private let twoFolds = """
     2\t1
     Person_A\t1\t2

@@ -10,6 +10,19 @@ public struct LFWImageRef: Hashable, Comparable, Sendable {
         self.number = number
     }
 
+    /// Parses an LFW file name `<name>_<digits>.jpg` inside the person's directory `<name>`; nil for
+    /// anything else (other files, a name that does not match its directory, image number 0).
+    public init?(directory: String, fileName: String) {
+        let suffix = ".jpg"
+        let prefix = directory + "_"
+        guard fileName.hasSuffix(suffix), fileName.hasPrefix(prefix) else { return nil }
+        let digits = fileName.dropFirst(prefix.count).dropLast(suffix.count)
+        guard !digits.isEmpty, digits.allSatisfy(\.isASCII), digits.allSatisfy(\.isNumber),
+            let number = Int(digits), number > 0
+        else { return nil }
+        self.init(name: directory, number: number)
+    }
+
     /// Path relative to the extracted `lfw/` directory.
     public var relativePath: String {
         let digits = String(number)
