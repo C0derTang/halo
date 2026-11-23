@@ -1,5 +1,5 @@
 # Master-owned. Generate the Xcode project with: xcodegen generate --spec App/project.yml
-# Halo.xcodeproj is generated and gitignored — never hand-edit it.
+# Halo.xcodeproj and Halo/Info.plist are generated and gitignored — never hand-edit them.
 name: Halo
 options:
   bundleIdPrefix: study.paradigm.halo
