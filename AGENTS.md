@@ -154,8 +154,8 @@ markdown, so any agent can follow them by reading the file:
 - Storage: GRDB database file with iOS Data Protection `.complete`; embeddings matched in-memory.
 - AI: on-device only (Foundation Models). No off-device LLM calls.
 - CI: GitHub Actions `macos-latest` runs `./scripts/check.sh` on every PR and push to main. **CI has an
-  older toolchain (Xcode 26.6 / Swift 6.2) than local dev (Xcode 27.2 / Swift 6.4): code must compile on
-  both.** Avoid Swift 6.3+ only features (e.g. typed throws through `rethrows` closures such as
+  older toolchain (Xcode 26.6 / Swift 6.3.x, iOS/macOS 26 SDKs) than local dev (Xcode 27.2 / Swift 6.4,
+  27 SDKs): code must compile on both, and must not use APIs introduced in the 27 SDKs.** Avoid Swift 6.4-only features (e.g. typed throws through `rethrows` closures such as
   `withUnsafeBytes`); when in doubt, use untyped `throws`. A PR is not mergeable until CI is green.
 - Data sources (verified 2026-11): Contacts + Apple Photos (on-device), iMessage via Mac bridge.
   Later: Google Photos (Picker API only — no whole-library access), Instagram (export import only —
