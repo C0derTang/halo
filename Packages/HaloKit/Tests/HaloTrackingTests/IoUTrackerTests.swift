@@ -81,6 +81,22 @@ private let dt = 1.0 / 30
     #expect(again.identity == .unknown)
 }
 
+@Test func iouRematchAfterLongGapResetsIdentity() {
+    var tr = IoUTracker(config: TrackerConfig(maxMissedFrames: 10, identityResetAfterMissed: 5))
+    var t = 0.0
+    let id = tr.update(observations: [obs(0.5, 0.5, 0.2, t: t)], timestamp: t)[0].id
+    tr.setIdentity(.known(PersonID(), similarity: 0.9, margin: 0.2), for: id)
+    for _ in 0..<6 {
+        t += dt
+        _ = tr.update(observations: [], timestamp: t)
+    }
+    t += dt
+    let out = tr.update(observations: [obs(0.5, 0.5, 0.2, t: t)], timestamp: t)
+    #expect(out.count == 1)
+    #expect(out[0].id == id)  // exact IoU re-match keeps the track...
+    #expect(out[0].identity == .unknown)  // ...but not the name
+}
+
 @Test func shortOcclusionKeepsIDAndIdentity() {
     var tr = IoUTracker(config: TrackerConfig(maxMissedFrames: 10))
     var t = 0.0
