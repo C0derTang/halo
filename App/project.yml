@@ -20,6 +20,18 @@ targets:
     type: application
     platform: iOS
     sources: [Halo]
+    postBuildScripts:
+      # Face embedding model fetched by scripts/fetch-models.sh (gitignored, never committed).
+      # Optional: without it the app builds and shows "recognition unavailable".
+      - name: Bundle face model if present
+        basedOnDependencyAnalysis: false
+        script: |
+          SRC="${PROJECT_DIR}/../Models/HaloFaceEmbedder.mlmodelc"
+          if [ -d "$SRC" ]; then
+            rsync -a --delete "$SRC" "${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/"
+          else
+            echo "note: Models/HaloFaceEmbedder.mlmodelc not found; recognition unavailable in this build"
+          fi
     dependencies:
       - package: HaloKit
         products: [HaloCore, HaloStore, HaloMatching, HaloClustering, HaloTracking, HaloVision, HaloImport, HaloLabels, HaloLens, HaloUI]
@@ -37,3 +49,4 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: study.paradigm.halo
         GENERATE_INFOPLIST_FILE: NO
+        ENABLE_USER_SCRIPT_SANDBOXING: NO

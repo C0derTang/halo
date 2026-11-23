@@ -37,11 +37,11 @@ let package = Package(
         // Vision face detection/alignment + CoreML embedder.
         .target(name: "HaloVision", dependencies: ["HaloCore"]),
         // Contacts + Photos + bridge-digest importers.
-        .target(name: "HaloImport", dependencies: ["HaloCore", "HaloBridgeKit"]),
+        .target(name: "HaloImport", dependencies: ["HaloCore", "HaloBridgeKit", "HaloClustering"]),
         // Label ranking: Person + identities + digest -> LabelData.
         .target(name: "HaloLabels", dependencies: ["HaloCore"]),
         // Live lens pipeline: frames -> detect -> track -> throttled embed -> match (seams only).
-        .target(name: "HaloLens", dependencies: ["HaloCore"]),
+        .target(name: "HaloLens", dependencies: ["HaloCore", "HaloTracking", "HaloMatching"]),
         // SwiftUI components (hologram label, cards).
         .target(name: "HaloUI", dependencies: ["HaloCore"], resources: [.process("Resources")]),
         // macOS iMessage bridge: chat.db reader + digest format (format is shared with the app).
@@ -50,15 +50,15 @@ let package = Package(
         .executableTarget(name: "halo-bridge", dependencies: ["HaloBridgeKit"]),
 
         .testTarget(name: "HaloCoreTests", dependencies: ["HaloCore"]),
-        .testTarget(name: "HaloStoreTests", dependencies: ["HaloStore"]),
-        .testTarget(name: "HaloMatchingTests", dependencies: ["HaloMatching"]),
-        .testTarget(name: "HaloClusteringTests", dependencies: ["HaloClustering"]),
-        .testTarget(name: "HaloTrackingTests", dependencies: ["HaloTracking"]),
-        .testTarget(name: "HaloVisionTests", dependencies: ["HaloVision"]),
-        .testTarget(name: "HaloImportTests", dependencies: ["HaloImport"]),
-        .testTarget(name: "HaloUITests", dependencies: ["HaloUI"]),
-        .testTarget(name: "HaloLabelsTests", dependencies: ["HaloLabels"]),
-        .testTarget(name: "HaloLensTests", dependencies: ["HaloLens"]),
-        .testTarget(name: "HaloBridgeKitTests", dependencies: ["HaloBridgeKit"]),
+        .testTarget(name: "HaloStoreTests", dependencies: ["HaloStore", "HaloCore"]),
+        .testTarget(name: "HaloMatchingTests", dependencies: ["HaloMatching", "HaloCore"]),
+        .testTarget(name: "HaloClusteringTests", dependencies: ["HaloClustering", "HaloCore"]),
+        .testTarget(name: "HaloTrackingTests", dependencies: ["HaloTracking", "HaloCore"]),
+        .testTarget(name: "HaloVisionTests", dependencies: ["HaloVision", "HaloCore"]),
+        .testTarget(name: "HaloImportTests", dependencies: ["HaloImport", "HaloCore"]),
+        .testTarget(name: "HaloUITests", dependencies: ["HaloUI", "HaloCore"]),
+        .testTarget(name: "HaloLabelsTests", dependencies: ["HaloLabels", "HaloCore"]),
+        .testTarget(name: "HaloLensTests", dependencies: ["HaloLens", "HaloCore"]),
+        .testTarget(name: "HaloBridgeKitTests", dependencies: ["HaloBridgeKit", "HaloCore"]),
     ]
 )

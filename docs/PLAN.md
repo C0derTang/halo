@@ -58,27 +58,24 @@ halo-bridge (macOS CLI, HaloBridgeKit) ──encrypted digest──► app
 **Wave 0 — master scaffold (done):** HaloKit package with all targets, `Contract.swift`,
 `Seams.swift`, XcodeGen app shell, `scripts/check.sh`, CI, agent playbooks.
 
-**Wave 1 — independent modules (parallel, one target each)**
-| Issue | Target | Tier |
-|-------|--------|------|
-| People graph store: schema, migrations, `PeopleStoring`, forget cascade, Data Protection | HaloStore | opus |
-| Open-set matcher + per-track vote accumulator | HaloMatching | opus |
-| Face detection + alignment + CoreML embedder, model fetch script, MODELS.md | HaloVision | opus |
-| IoU tracker + One Euro smoothing (`FaceTracking`) | HaloTracking | sonnet |
-| Embedding clustering for enrollment suggestions | HaloClustering | sonnet |
-| Hologram label + context card SwiftUI components (no `.metal`) | HaloUI | sonnet |
-| iMessage bridge: chat.db reader → `InteractionDigest` CLI | HaloBridgeKit + halo-bridge | sonnet |
-| Contacts importer + handle normalization/resolution | HaloImport | sonnet |
+**Wave 1 — independent modules: DONE (2026-11-23).** Merged #9 HaloUI, #10 HaloTracking,
+#11 HaloImport contacts, #12 halo-bridge, #14 HaloClustering, #15 HaloMatching, #16 HaloStore,
+#18 HaloVision. Follow-ups: #13, #17.
 
-**Wave 2 — pipelines and flows**
+**Wave 2 — pipelines and flows** (seams added by master: `VideoFrame`, `FrameFaceDetecting`,
+`FrameFaceEmbedding`, `ClusterRecord`, `EnrollmentStoring`, `PrivacyStoring`)
 | Issue | Where | Tier |
 |-------|-------|------|
-| Live lens pipeline: capture → detect → track → throttled embed → match | HaloLens | opus |
+| Store: EnrollmentStoring + PrivacyStoring, cluster table, forget-cluster cascade, erasure fixes | HaloStore | opus |
+| Frame-based detect/embed (VideoFrame + orientation), async model factory, vision follow-ups | HaloVision | opus |
+| Live lens pipeline: capture → detect → track → throttled embed → vote → re-verify | HaloLens | opus |
 | Photo library scan job (resumable) → embeddings → clusters | HaloImport/PhotoScan | opus |
-| Encrypted digest transport: bridge export + QR pairing + app import | HaloBridgeKit + HaloImport | opus |
+| Encrypted digest transport: QR pairing + HPKE envelope + bridge follow-ups | HaloBridgeKit + halo-bridge | opus |
 | Label ranker | HaloLabels | sonnet |
-| Enrollment triage UI ("Who is this?") | App/Halo/People | sonnet |
-| Privacy shell: Face ID lock, kill switch, forget UI, recognition log | App/Halo/Settings | sonnet |
+| Enrollment triage ("Who is this?") view model + views | HaloUI + App/Halo/People | sonnet |
+| Privacy shell: Face ID lock, kill switch, forget UI, recognition log + HaloUI follow-ups | HaloUI + App/Halo/Settings | sonnet |
+| Contacts import hardening: identityConflict, cross-kind ambiguity, shared normalizer | HaloImport/Contacts | sonnet |
+| Algorithm follow-ups (matching, tracking, clustering) | HaloMatching/Tracking/Clustering | sonnet |
 
 **Wave 3 — integration**
 | Issue | Where | Tier |
