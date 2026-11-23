@@ -197,6 +197,7 @@ public struct FaceClusterer: Sendable {
 
     /// Symmetric kNN graph: edges at/above threshold, strongest `maxNeighbors` per node.
     private func buildGraph(flat: [Float], n: Int, dim: Int) -> [[(Int, Float)]] {
+        guard n > 0 else { return [] }
         let blockRows = max(1, min(n, 4_000_000 / max(n, 1)))
         var sims = [Float](repeating: 0, count: blockRows * n)
         // Transpose once: (n x dim) -> (dim x n), so each block is a plain row-major product.

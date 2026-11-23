@@ -129,6 +129,16 @@ private func purity(_ result: ClusteringResult, truth: [UUID: Int]) -> Double {
     }
 }
 
+@Test func onlyLowQualityEmbeddingsYieldEmptyClusters() throws {
+    var g = LCG(state: 10)
+    let c = centers(1)[0]
+    let poor = (0..<4).map { _ in sample(c, noise: 0.2, quality: 0.05, g: &g) }
+    let result = try FaceClusterer().cluster(poor)
+    #expect(result.clusters.isEmpty)
+    #expect(result.unclustered.isEmpty)
+    #expect(Set(result.lowQuality) == Set(poor.map(\.id)))
+}
+
 @Test func lowQualityFiltered() throws {
     var g = LCG(state: 9)
     let c = centers(1)[0]
