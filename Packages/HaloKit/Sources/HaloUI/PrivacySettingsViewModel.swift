@@ -66,6 +66,13 @@ public final class PrivacySettingsViewModel {
     @discardableResult
     public func confirmForget() async -> Bool {
         guard let person = pendingForget else { return false }
+        return await confirmForget(person)
+    }
+
+    /// Forgets `person`, captured by the confirmation dialog at presentation time so that the
+    /// dialog's dismissal (which clears `pendingForget`) cannot turn the confirmed action into a no-op.
+    @discardableResult
+    public func confirmForget(_ person: Person) async -> Bool {
         pendingForget = nil
         do {
             try await store.forget(person.id)

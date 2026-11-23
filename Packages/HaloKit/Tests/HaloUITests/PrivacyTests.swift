@@ -6,8 +6,8 @@ import Testing
 @testable import HaloUI
 
 private final class Clock: @unchecked Sendable {
-    var date = Date(timeIntervalSince1970: 1_000_000)
-    func advance(_ seconds: TimeInterval) { date.addTimeInterval(seconds) }
+    var date: TimeInterval = 1000
+    func advance(_ seconds: TimeInterval) { date += seconds }
 }
 
 /// Counts calls and returns a scripted result.
@@ -46,6 +46,23 @@ private final class CountingAuth: Authenticating, @unchecked Sendable {
         #expect(await lock.unlock() == false)
         #expect(lock.isLocked)
         #expect(lock.isCovered)
+    }
+
+    @Test func failedPromptSuppressesAutoPromptUntilManualUnlock() async {
+        let auth = CountingAuth(false)
+        let lock = AppLock(authenticator: auth)
+        #expect(lock.shouldAutoPrompt)
+        await lock.unlock()
+        #expect(!lock.shouldAutoPrompt)
+        auth.set(true)
+        #expect(await lock.unlock())
+        #expect(!lock.isLocked)
+    }
+
+    @Test func defaultClockIsMonotonic() {
+        let a = AppLock.monotonicNow()
+        let b = AppLock.monotonicNow()
+        #expect(b >= a)
     }
 
     @Test func locksAfterBackgroundTimeout() async {
@@ -115,6 +132,16 @@ private final class CountingAuth: Authenticating, @unchecked Sendable {
         #expect(await model.confirmForget() == false)
         #expect(store.forgotten.count == 1)
         #expect(!model.items.contains { $0.id == confirmed.id })
+    }
+
+    @Test func dismissalBeforeConfirmStillForgets() async {
+        let (model, store, confirmed, _, _) = makeModel()
+        await model.load()
+        model.requestForget(confirmed.id)
+        let captured = model.pendingForget!  // dialog `presenting:` value
+        model.cancelForget()  // dismissal setter runs before the deferred Task
+        #expect(await model.confirmForget(captured))
+        #expect(store.forgotten == [confirmed.id])
     }
 
     @Test func cancelForgetDoesNotCallStore() async {

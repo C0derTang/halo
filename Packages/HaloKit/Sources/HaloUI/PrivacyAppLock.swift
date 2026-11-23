@@ -12,14 +12,26 @@ public final class AppLock {
     public private(set) var isAuthenticating = false
 
     @ObservationIgnored private let authenticator: any Authenticating
-    @ObservationIgnored private let now: @MainActor () -> Date
+    @ObservationIgnored private let now: @MainActor () -> TimeInterval
     @ObservationIgnored private let timeout: TimeInterval
-    @ObservationIgnored private var backgroundedAt: Date?
+    @ObservationIgnored private var backgroundedAt: TimeInterval?
+    /// Set when the last prompt failed or was cancelled; suppresses automatic re-prompting.
+    public private(set) var needsManualUnlock = false
+
+    /// Monotonic seconds (includes sleep, unaffected by wall-clock changes).
+    public static let monotonicNow: @MainActor () -> TimeInterval = {
+        let clock = ContinuousClock()
+        let start = clock.now
+        return {
+            let d = start.duration(to: clock.now).components
+            return Double(d.seconds) + Double(d.attoseconds) / 1e18
+        }
+    }()
 
     public init(
         authenticator: any Authenticating,
         timeout: TimeInterval = AppLock.defaultTimeout,
-        now: @escaping @MainActor () -> Date = { Date() }
+        now: @escaping @MainActor () -> TimeInterval = AppLock.monotonicNow
     ) {
         self.authenticator = authenticator
         self.timeout = timeout
@@ -29,13 +41,20 @@ public final class AppLock {
     /// True when app content must not be visible: locked, or not the active scene (snapshot).
     public var isCovered: Bool { isLocked || phase != .active }
 
+    /// Whether becoming active should automatically prompt. False after a failed/cancelled prompt:
+    /// the user must tap Unlock, so cancelling never causes a re-prompt loop.
+    public var shouldAutoPrompt: Bool { isLocked && !needsManualUnlock }
+
     public func scenePhaseChanged(to newPhase: ScenePhase) {
         phase = newPhase
         switch newPhase {
         case .background:
             if backgroundedAt == nil { backgroundedAt = now() }
         case .active:
-            if let at = backgroundedAt, now().timeIntervalSince(at) > timeout { isLocked = true }
+            if let at = backgroundedAt, now() - at > timeout {
+                isLocked = true
+                needsManualUnlock = false
+            }
             backgroundedAt = nil
         default:
             break
@@ -51,6 +70,7 @@ public final class AppLock {
         defer { isAuthenticating = false }
         let ok = await authenticator.authenticate(reason: "Unlock Halo")
         if ok { isLocked = false }
+        needsManualUnlock = !ok
         return ok
     }
 }
@@ -97,7 +117,7 @@ struct PrivacyLockModifier: ViewModifier {
             .overlay { if lock.isCovered { PrivacyCover(lock: lock) } }
             .onChange(of: scenePhase, initial: true) { _, phase in
                 lock.scenePhaseChanged(to: phase)
-                if phase == .active, lock.isLocked { Task { await lock.unlock() } }
+                if phase == .active, lock.shouldAutoPrompt { Task { await lock.unlock() } }
             }
     }
 }

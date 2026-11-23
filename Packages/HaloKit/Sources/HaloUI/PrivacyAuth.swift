@@ -7,7 +7,8 @@ public protocol Authenticating: Sendable {
     func authenticate(reason: String) async -> Bool
 }
 
-/// Real implementation over LocalAuthentication. Fails closed when authentication is unavailable.
+/// Real implementation over LocalAuthentication. Fails closed: when no passcode or biometrics are
+/// set up (policy cannot be evaluated) it returns false, so the app stays locked and erase is refused.
 public struct LocalAuthenticator: Authenticating {
     public init() {}
 

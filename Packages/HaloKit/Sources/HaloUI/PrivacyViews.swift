@@ -92,15 +92,20 @@ public struct SettingsView: View {
             .navigationTitle("Privacy")
             .task { await model.load() }
             .confirmationDialog(
-                "Forget \(model.pendingForget?.displayName ?? "this person")?",
+                "Forget this person?",
                 isPresented: Binding(
                     get: { model.pendingForget != nil },
                     set: { if !$0 { model.cancelForget() } }),
-                titleVisibility: .visible
-            ) {
-                Button("Forget permanently", role: .destructive) { Task { await model.confirmForget() } }
+                titleVisibility: .visible,
+                presenting: model.pendingForget
+            ) { person in
+                // `person` is captured at presentation, so the dismissal setter above cannot race it.
+                Button("Forget permanently", role: .destructive) {
+                    Task { await model.confirmForget(person) }
+                }
                 Button("Cancel", role: .cancel) { model.cancelForget() }
-            } message: {
+            } message: { _ in
+                // No name here: presented UI is not under the privacy cover.
                 Text("Deletes all face data and records for them. This cannot be undone.")
             }
             .sheet(isPresented: $showEraseSheet) { eraseSheet }
