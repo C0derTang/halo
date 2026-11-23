@@ -28,9 +28,11 @@ public enum ChatDatabaseError: Error, CustomStringConvertible, Equatable {
 /// `attributedBody` are never referenced. v1 covers 1:1 chats only: chats whose
 /// `chat_handle_join` has exactly one handle. Group chats are excluded.
 ///
-/// v1 counts every `message` row in those chats, including tapbacks/reactions
-/// (`associated_message_type != 0`) and other system rows. No filter is applied so the query
-/// stays valid on older schemas lacking that column.
+/// Tapbacks/reactions (`associated_message_type != 0`) are excluded when the schema has that
+/// column; older schemas without it are read unfiltered (the column is never assumed).
+///
+/// Each snapshot directory holds an `owner.pid` file; the stale-snapshot sweep never deletes a
+/// snapshot whose owner process is still alive (up to a 24 h cap against pid reuse).
 public final class ChatDatabaseReader: Sendable {
     public static var defaultURL: URL {
         URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Messages/chat.db")
@@ -40,14 +42,39 @@ public final class ChatDatabaseReader: Sendable {
     let queue: DatabaseQueue
 
     static let snapshotPrefix = "halo-bridge-"
+    static let pidFileName = "owner.pid"
+
+    /// Owner pid recorded in a snapshot directory, if the file exists and holds a valid pid.
+    static func ownerPID(of dir: URL) -> pid_t? {
+        guard let data = try? Data(contentsOf: dir.appendingPathComponent(pidFileName)),
+            let pid = pid_t(
+                String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)),
+            pid > 0  // never probe 0 / negative pids (process groups)
+        else { return nil }
+        return pid
+    }
+
+    /// Whether `pid` names a running process (signal 0 only checks; EPERM still means alive).
+    static func isAlive(_ pid: pid_t) -> Bool {
+        kill(pid, 0) == 0 || errno == EPERM
+    }
+
+    static func modificationDate(_ url: URL) -> Date? {
+        (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+    }
 
     /// Removes snapshot directories left behind by a crashed run (they hold full message
-    /// bodies). Only directories older than `olderThan` seconds are removed so a concurrently
-    /// running instance is not disturbed.
+    /// bodies).
+    /// - A snapshot whose `owner.pid` names a live process is kept, but only while the pid file
+    ///   is younger than `maxLiveAge` (24 h): a reused pid can't keep message bodies around
+    ///   indefinitely, and no real run takes that long.
+    /// - A snapshot with a dead owner is removed immediately.
+    /// - One without a valid pid file (an owner that has not written it yet, or an older build)
+    ///   is removed once older than `olderThan` seconds.
     @discardableResult
     static func removeStaleSnapshots(
         in tempDir: URL = FileManager.default.temporaryDirectory, olderThan age: TimeInterval = 300,
-        now: Date = Date()
+        maxLiveAge: TimeInterval = 24 * 3600, now: Date = Date()
     ) -> Int {
         let fm = FileManager.default
         guard
@@ -56,9 +83,12 @@ public final class ChatDatabaseReader: Sendable {
         else { return 0 }
         var removed = 0
         for item in items where item.lastPathComponent.hasPrefix(snapshotPrefix) {
-            let modified = (try? item.resourceValues(forKeys: [.contentModificationDateKey]))?
-                .contentModificationDate
-            if let modified, now.timeIntervalSince(modified) < age { continue }
+            if let pid = ownerPID(of: item) {
+                let claimed = modificationDate(item.appendingPathComponent(pidFileName))
+                if isAlive(pid), let claimed, now.timeIntervalSince(claimed) < maxLiveAge { continue }
+            } else {
+                if let modified = modificationDate(item), now.timeIntervalSince(modified) < age { continue }
+            }
             if (try? fm.removeItem(at: item)) != nil { removed += 1 }
         }
         return removed
@@ -75,6 +105,8 @@ public final class ChatDatabaseReader: Sendable {
             try fm.createDirectory(
                 at: dir, withIntermediateDirectories: true,
                 attributes: [.posixPermissions: 0o700])
+            // Claim the snapshot before copying anything into it.
+            try Data("\(getpid())\n".utf8).write(to: dir.appendingPathComponent(Self.pidFileName))
             let target = dir.appendingPathComponent("chat.db")
             try fm.copyItem(at: url, to: target)
             // Copy db + wal only. The -shm index is rebuilt by SQLite; copying a live shm could
@@ -124,19 +156,26 @@ public final class ChatDatabaseReader: Sendable {
 
     /// Metadata for every message in a 1:1 chat.
     public func messageRecords() throws -> [MessageRecord] {
-        let sql = """
-            SELECT h.id AS handle, m.is_from_me AS is_from_me, m.date AS date
-            FROM message m
-            JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
-            JOIN chat_handle_join chj ON chj.chat_id = cmj.chat_id
-            JOIN handle h ON h.ROWID = chj.handle_id
-            WHERE cmj.chat_id IN (
-                SELECT chat_id FROM chat_handle_join GROUP BY chat_id HAVING COUNT(*) = 1
-            )
-            """
         do {
             return try queue.read { db in
-                try Row.fetchAll(db, sql: sql).compactMap { row -> MessageRecord? in
+                let hasTapbackColumn = try db.columns(in: "message").contains {
+                    $0.name.lowercased() == "associated_message_type"
+                }
+                let tapbackFilter =
+                    hasTapbackColumn
+                    ? "AND (m.associated_message_type IS NULL OR m.associated_message_type = 0)" : ""
+                let sql = """
+                    SELECT h.id AS handle, m.is_from_me AS is_from_me, m.date AS date
+                    FROM message m
+                    JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
+                    JOIN chat_handle_join chj ON chj.chat_id = cmj.chat_id
+                    JOIN handle h ON h.ROWID = chj.handle_id
+                    WHERE cmj.chat_id IN (
+                        SELECT chat_id FROM chat_handle_join GROUP BY chat_id HAVING COUNT(*) = 1
+                    )
+                    \(tapbackFilter)
+                    """
+                return try Row.fetchAll(db, sql: sql).compactMap { row -> MessageRecord? in
                     guard let handle: String = row["handle"], let date: Int64 = row["date"] else {
                         return nil
                     }

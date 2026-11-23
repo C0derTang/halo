@@ -2,21 +2,38 @@ import Foundation
 
 /// Normalizes chat.db / Contacts handles so the bridge and the app agree on identity values.
 /// Emails are lowercased; phone numbers become E.164 on a best-effort basis.
+///
+/// Numbers already in international form (`+…` or `00…`) always normalize to E.164. National
+/// numbers get the default calling code only when one is known: for a region outside the
+/// built-in table they are left as bare digits (no "+"), never guessed as +1, because a wrong
+/// calling code can make a handle collide with a different person's number.
 public struct HandleNormalizer: Sendable {
     /// Calling code (no "+") applied to numbers without an international prefix. Default US = "1".
+    /// Empty when the normalizer was made for an unknown region (see `isKnownRegion`).
     public var defaultCountryCode: String
+
+    /// False when built for a region outside the built-in table: national-format numbers are
+    /// then left unnormalized (digits only).
+    public var isKnownRegion: Bool { !defaultCountryCode.isEmpty }
 
     public init(defaultCountryCode: String = "1") {
         self.defaultCountryCode = defaultCountryCode
     }
 
-    /// Convenience for a few common ISO regions; unknown regions fall back to US.
+    static let callingCodes = [
+        "US": "1", "CA": "1", "GB": "44", "AU": "61", "DE": "49", "FR": "33", "IN": "91",
+        "JP": "81", "CN": "86", "MX": "52", "BR": "55", "ES": "34", "IT": "39", "NL": "31",
+    ]
+
+    /// Convenience for a few common ISO regions (case-insensitive). For any other region,
+    /// national-format numbers are left unnormalized; see `isKnownRegion(_:)`.
     public init(region: String) {
-        let codes = [
-            "US": "1", "CA": "1", "GB": "44", "AU": "61", "DE": "49", "FR": "33", "IN": "91",
-            "JP": "81", "CN": "86", "MX": "52", "BR": "55", "ES": "34", "IT": "39", "NL": "31",
-        ]
-        self.init(defaultCountryCode: codes[region.uppercased()] ?? "1")
+        self.init(defaultCountryCode: Self.callingCodes[region.uppercased()] ?? "")
+    }
+
+    /// Whether `init(region:)` knows `region`'s calling code.
+    public static func isKnownRegion(_ region: String) -> Bool {
+        callingCodes[region.uppercased()] != nil
     }
 
     public func normalize(_ raw: String) -> String {
@@ -31,6 +48,9 @@ public struct HandleNormalizer: Sendable {
 
         if hasPlus { return "+" + digits }
         if digits.hasPrefix("00") { return "+" + digits.dropFirst(2) }
+
+        // Unknown region: there is no safe calling code to assume.
+        guard isKnownRegion else { return digits }
 
         if defaultCountryCode == "1" {
             if digits.count == 10 { return "+1" + digits }

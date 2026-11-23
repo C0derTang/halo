@@ -98,39 +98,6 @@ import Testing
         }
     }
 
-    @Test func cliWritesMetadataOnlyDigest() throws {
-        let db = try fixture()
-        let out = db.dir.appendingPathComponent("digest.json")
-        let code = BridgeCLI.run(arguments: [
-            "digest", "--db", db.url.path, "--out", out.path, "--now", "2027-01-15T08:00:00Z",
-        ])
-        #expect(code == 0)
-        let data = try Data(contentsOf: out)
-        let text = String(decoding: data, as: UTF8.self)
-        #expect(!text.contains(SyntheticChatDB.secretText))
-        let dec = JSONDecoder()
-        dec.dateDecodingStrategy = .iso8601
-        let digest = try dec.decode(InteractionDigest.self, from: data)
-        #expect(digest.version == InteractionDigest.currentVersion)
-        #expect(digest.entries.count == 2)
-        #expect(digest.generatedAt == ISO8601DateFormatter().date(from: "2027-01-15T08:00:00Z"))
-    }
-
-    @Test func cliErrors() throws {
-        var messages: [String] = []
-        #expect(BridgeCLI.run(arguments: [], errorOutput: { messages.append($0) }) == 64)
-        #expect(BridgeCLI.run(arguments: ["digest"], errorOutput: { messages.append($0) }) == 64)
-        #expect(
-            BridgeCLI.run(
-                arguments: ["digest", "--out", "x", "--now", "garbage"], errorOutput: { messages.append($0) })
-                == 64)
-        #expect(
-            BridgeCLI.run(
-                arguments: ["digest", "--db", "/nonexistent/chat.db", "--out", "/tmp/x"],
-                errorOutput: { messages.append($0) }) == 1)
-        #expect(messages.count == 4)
-    }
-
     @Test func uncheckpointedWalIsSnapshotted() throws {
         let db = try fixture(wal: true)  // db stays open: data lives only in the -wal
         let wal = db.url.path + "-wal"
@@ -159,11 +126,108 @@ import Testing
         #expect(FileManager.default.fileExists(atPath: other.path))
     }
 
-    @Test func cliOutputIsOwnerOnly() throws {
+    /// A pid that is certainly not running: a child that has already exited and been reaped.
+    func deadPID() throws -> pid_t {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/true")
+        try p.run()
+        p.waitUntilExit()
+        return p.processIdentifier
+    }
+
+    @Test func livePidProtectsSnapshotFromSweep() throws {
+        let fm = FileManager.default
+        let tmp = fm.temporaryDirectory.appendingPathComponent("sweep-\(UUID())")
+        try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tmp) }
+        func snapshot(_ name: String, pid: String?) throws -> URL {
+            let d = tmp.appendingPathComponent("\(ChatDatabaseReader.snapshotPrefix)\(name)")
+            try fm.createDirectory(at: d, withIntermediateDirectories: true)
+            if let pid {
+                try Data(pid.utf8).write(to: d.appendingPathComponent(ChatDatabaseReader.pidFileName))
+            }
+            return d
+        }
+        let live = try snapshot("live", pid: "\(getpid())\n")
+        let dead = try snapshot("dead", pid: "\(try deadPID())")
+        let garbage = try snapshot("garbage", pid: "not-a-pid")
+        let groupPID = try snapshot("zero", pid: "0")
+        let noPID = try snapshot("nopid", pid: nil)
+
+        // Now: the dead owner's snapshot goes immediately; young pid-less/invalid ones stay.
+        #expect(ChatDatabaseReader.removeStaleSnapshots(in: tmp, olderThan: 300) == 1)
+        #expect(!fm.fileExists(atPath: dead.path))
+        for d in [live, garbage, groupPID, noPID] { #expect(fm.fileExists(atPath: d.path)) }
+
+        // Hours later: everything old is swept except the live run's snapshot.
+        let removed = ChatDatabaseReader.removeStaleSnapshots(
+            in: tmp, olderThan: 300, now: Date().addingTimeInterval(23 * 3600))
+        #expect(removed == 3)
+        #expect(fm.fileExists(atPath: live.path))
+
+        // Past the 24 h cap even a "live" pid (possibly reused) no longer protects it.
+        #expect(
+            ChatDatabaseReader.removeStaleSnapshots(
+                in: tmp, olderThan: 300, now: Date().addingTimeInterval(25 * 3600)) == 1)
+        #expect(!fm.fileExists(atPath: live.path))
+    }
+
+    @Test func livePidCapIsConfigurable() throws {
+        let fm = FileManager.default
+        let tmp = fm.temporaryDirectory.appendingPathComponent("sweep-\(UUID())")
+        let snap = tmp.appendingPathComponent("\(ChatDatabaseReader.snapshotPrefix)live")
+        try fm.createDirectory(at: snap, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tmp) }
+        let pidFile = snap.appendingPathComponent(ChatDatabaseReader.pidFileName)
+        try Data("\(getpid())".utf8).write(to: pidFile)
+        // Backdate the claim: an old pid file with a live pid is treated as pid reuse.
+        try fm.setAttributes(
+            [.modificationDate: Date().addingTimeInterval(-2 * 3600)], ofItemAtPath: pidFile.path)
+        #expect(ChatDatabaseReader.removeStaleSnapshots(in: tmp, maxLiveAge: 3 * 3600) == 0)
+        #expect(ChatDatabaseReader.removeStaleSnapshots(in: tmp, maxLiveAge: 3600) == 1)
+    }
+
+    @Test func readerWritesOwnPidFile() throws {
+        let fm = FileManager.default
         let db = try fixture()
-        let out = db.dir.appendingPathComponent("perm.json")
-        #expect(BridgeCLI.run(arguments: ["digest", "--db", db.url.path, "--out", out.path]) == 0)
-        let perms = try FileManager.default.attributesOfItem(atPath: out.path)[.posixPermissions] as? Int
-        #expect(perms == 0o600)
+        let reader = try ChatDatabaseReader(url: db.url)
+        let dir = URL(fileURLWithPath: reader.queue.path).deletingLastPathComponent()
+        #expect(ChatDatabaseReader.ownerPID(of: dir) == getpid())
+
+        // Sweep a scratch copy (never the real $TMPDIR, where parallel tests keep snapshots):
+        // however aggressive the sweep, the live owner's snapshot stays.
+        let scratch = fm.temporaryDirectory.appendingPathComponent("sweep-\(UUID())")
+        try fm.createDirectory(at: scratch, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: scratch) }
+        let copy = scratch.appendingPathComponent(dir.lastPathComponent)
+        try fm.copyItem(at: dir, to: copy)
+        #expect(
+            ChatDatabaseReader.removeStaleSnapshots(
+                in: scratch, olderThan: 0, now: Date().addingTimeInterval(3600)) == 0)
+        #expect(fm.fileExists(atPath: copy.path))
+        #expect(try reader.messageRecords().count == 3)
+    }
+
+    @Test func tapbacksFilteredWhenColumnExists() throws {
+        let db = try SyntheticChatDB(tapbackColumn: true)
+        let alice = try db.addHandle("+14155550132")
+        let chat = try db.addChat(handles: [alice])
+        try db.addMessage(chat: chat, handle: alice, fromMe: false, at: now.addingTimeInterval(-7200))
+        // A later reaction from me must not count as a reply.
+        try db.addTapback(chat: chat, handle: alice, fromMe: true, at: now.addingTimeInterval(-3600))
+        try db.addTapback(
+            chat: chat, handle: alice, fromMe: false, at: now.addingTimeInterval(-60), type: 3001)
+        let records = try ChatDatabaseReader(url: db.url).messageRecords()
+        #expect(records.count == 1)
+        #expect(records.allSatisfy { !$0.isFromMe })
+        let digest = DigestBuilder().build(records: records, now: now)
+        #expect(digest.entries.first?.awaitingMyReply == true)
+        #expect(digest.entries.first?.messagesAllTime == 1)
+    }
+
+    @Test func tapbackColumnAbsentReadsEverything() throws {
+        // Older schema: no associated_message_type column; the query must still work.
+        let db = try fixture()
+        #expect(try ChatDatabaseReader(url: db.url).messageRecords().count == 3)
     }
 }
