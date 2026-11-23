@@ -19,7 +19,7 @@ import Synchronization
 /// runs on the single writer connection, so while a reader blocks it, any ordinary write issued
 /// meanwhile queues behind it for up to `busyTimeout` (default 2 s). Ordinary writes themselves
 /// never wait for readers.
-public final class PeopleStore: PeopleStoring, EnrollmentStoring, PrivacyStoring {
+public final class PeopleStore: PeopleStoring, EnrollmentStoring, PrivacyStoring, MemoryStoring {
     /// How long a checkpoint/write waits for other connections before giving up.
     public static let defaultBusyTimeout: TimeInterval = 2
 
@@ -260,7 +260,8 @@ public final class PeopleStore: PeopleStoring, EnrollmentStoring, PrivacyStoring
     }
 
     /// Kill switch: deletes every row of every table (people, identities, embeddings, clusters,
-    /// scan cursor, digest, recognition log) in one transaction, then erases the WAL like `forget`.
+    /// scan cursor, digest, recognition log, memory hooks) in one transaction, then erases the WAL
+    /// like `forget`.
     public func eraseEverything() async throws {
         try await writer.write { db in
             for table in try Self.dataTables(db) {

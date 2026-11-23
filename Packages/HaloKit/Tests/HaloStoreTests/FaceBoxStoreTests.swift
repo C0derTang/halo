@@ -58,7 +58,7 @@ import Testing
         }
 
         let store = try PeopleStore(writer: queue)
-        #expect(try await store.appliedMigrations() == ["v1", "v2", "v3_faceBox"])
+        #expect(try await store.appliedMigrations() == ["v1", "v2", "v3_faceBox", "v4_memoryHooks"])
         let old = try #require(try await store.embeddings(ids: [id]).first)
         #expect(old.faceBox == nil)
         #expect(old.vector == [1, 2, 3, 4])

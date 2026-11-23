@@ -16,6 +16,8 @@ public enum PeopleStoreError: Error, Equatable, Sendable {
     /// None of the cluster's member embeddings exist any more (all deleted during triage). The
     /// stale record was deleted and the person was NOT confirmed.
     case emptyCluster(id: String)
+    /// A hook passed to `replaceHooks` belongs to a different person than the one being replaced.
+    case hookPersonMismatch(hook: UUID, expected: PersonID)
     /// A cluster passed to `replaceClusters` is malformed (a caller bug); nothing was stored.
     /// Stale state (deleted/assigned members, a forgotten suggested person) is pruned, not thrown.
     case invalidCluster(id: String, reason: ClusterProblem)
@@ -138,6 +140,19 @@ enum RowDecoding {
             id: id, personID: owner, space: space, vector: vector, source: source,
             sourceRef: row["sourceRef"], quality: Float(row["quality"] as Double),
             createdAt: Date(storedValue: row["createdAt"]), faceBox: faceBox)
+    }
+
+    static func memoryHook(_ row: Row) throws -> MemoryHook {
+        let table = Schema.memoryHook
+        guard let rawSource: String = row["source"], let source = MemoryHook.Source(rawValue: rawSource)
+        else {
+            throw PeopleStoreError.corruptRow(table: table, column: "source")
+        }
+        let expires: Double? = row["expiresAt"]
+        return MemoryHook(
+            id: try uuid(row, "id", table: table), personID: try personID(row, "personId", table: table),
+            text: row["text"], source: source, createdAt: Date(storedValue: row["createdAt"]),
+            expiresAt: expires.map(Date.init(storedValue:)))
     }
 
     static func encodeBirthday(_ birthday: DateComponents?) throws -> String? {
