@@ -215,3 +215,57 @@ private func feed(_ voter: inout TrackVoter, _ results: [MatchResult], trackID: 
         #expect(out[6] == .unknown)  // 3 of 6: precision over recall
     }
 }
+
+@Suite struct TrackVoterResetStreakTests {
+    let policy = MatchPolicy.conservative  // minVotes = 3
+
+    @Test func clearsSwitchStreakButKeepsHeldName() {
+        var voter = TrackVoter(policy: policy)
+        feed(&voter, [known(alice), known(alice), known(alice)])
+        feed(&voter, [known(bob), known(bob)])  // two of three needed to switch
+        voter.resetStreak(for: track)
+        #expect(isKnown(voter.identity(for: track), as: alice))
+        // The pre-reset streak no longer counts: the third bob must not complete the switch.
+        // (The off streak is kept, so it drops the name instead: never a wrong name.)
+        #expect(voter.record(known(bob), for: track) == .unknown)
+    }
+
+    @Test func withoutResetThePartialStreakWouldSwitch() {
+        var voter = TrackVoter(policy: policy)
+        feed(&voter, [known(alice), known(alice), known(alice)])
+        feed(&voter, [known(bob), known(bob)])
+        #expect(isKnown(voter.record(known(bob), for: track), as: bob))
+    }
+
+    @Test func keepsOffStreakAndWindow() {
+        var voter = TrackVoter(policy: policy)
+        feed(&voter, [known(alice), known(alice), known(alice)])
+        feed(&voter, [.unknown, .unknown])  // off streak 2, still held
+        voter.resetStreak(for: track)
+        #expect(isKnown(voter.identity(for: track), as: alice))
+        // Third consecutive non-alice result drops the name: the off streak survived the reset.
+        #expect(voter.record(.unknown, for: track) == .unknown)
+    }
+
+    @Test func resetBeforeNameStopsAcquireStreak() {
+        var voter = TrackVoter(policy: policy)
+        feed(&voter, [known(alice), known(alice)])
+        voter.resetStreak(for: track)
+        #expect(voter.record(known(alice), for: track) == .unknown)
+        #expect(voter.trackCount == 1)
+    }
+
+    @Test func untrackedIdIsNoOp() {
+        var voter = TrackVoter(policy: policy)
+        voter.resetStreak(for: other)
+        #expect(voter.trackCount == 0)
+        #expect(voter.identity(for: other) == .unknown)
+    }
+
+    @Test func otherTracksAreUntouched() {
+        var voter = TrackVoter(policy: policy)
+        feed(&voter, [known(alice), known(alice)], trackID: other)
+        voter.resetStreak(for: track)
+        #expect(isKnown(voter.record(known(alice), for: other), as: alice))
+    }
+}

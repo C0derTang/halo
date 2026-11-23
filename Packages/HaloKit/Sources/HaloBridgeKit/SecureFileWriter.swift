@@ -13,7 +13,7 @@ public enum SecureFileWriterError: Error, Equatable, CustomStringConvertible {
 }
 
 /// Writes owner-only (0600) files atomically: the data goes to a temp file created 0600 with
-/// `O_EXCL` in the destination directory, is fsynced, then `rename(2)`d over the destination.
+/// `O_EXCL` in the destination directory, is fsynced, then `rename(2)`d over the destination, and the parent directory is fsynced so the rename survives a crash.
 /// Readers see either the old file or the complete new one, never a partial or world-readable
 /// file. On failure the temp file is removed and the destination is untouched.
 public enum SecureFileWriter {
@@ -55,5 +55,12 @@ public enum SecureFileWriter {
             throw .posix(operation: "rename", path: dest.path, code: errno)
         }
         committed = true
+        // Make the rename itself durable: fsync the parent directory so a crash cannot lose it.
+        let dirFD = open(dir.path, O_RDONLY | O_CLOEXEC | O_DIRECTORY)
+        guard dirFD >= 0 else { throw .posix(operation: "open directory", path: dir.path, code: errno) }
+        defer { close(dirFD) }
+        guard fsync(dirFD) == 0 else {
+            throw .posix(operation: "fsync directory", path: dir.path, code: errno)
+        }
     }
 }

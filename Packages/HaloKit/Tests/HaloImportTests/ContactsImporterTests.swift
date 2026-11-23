@@ -247,3 +247,22 @@ private func ada(name: String = "Ada", org: String = "Acme") -> ContactRecord {
                 == p1.id)
     }
 }
+
+@Suite struct HandleNormalizationRegionFallbackTests {
+    @Test func missingRegionFallsBackToUnknownNotUS() {
+        let none = HandleNormalization(region: nil)
+        #expect(none.normalizer.defaultCountryCode.isEmpty)
+        #expect(!none.normalizer.isKnownRegion)
+        // A national-format number is not guessed as +1.
+        #expect(none.e164("(415) 555-0134") == nil)
+        // International form still normalizes.
+        #expect(none.e164("+44 20 7946 0958") == "+442079460958")
+        #expect(none.e164("0044 20 7946 0958") == "+442079460958")
+        #expect(none.email(" A@B.com ") == "a@b.com")
+    }
+
+    @Test func explicitRegionsStillWork() {
+        #expect(HandleNormalization(region: "US").e164("(415) 555-0134") == "+14155550134")
+        #expect(!HandleNormalization(region: "ZZ").normalizer.isKnownRegion)
+    }
+}

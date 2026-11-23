@@ -87,10 +87,56 @@ private func candidate(_ id: UInt64, labeled: Bool = false, eligible: Bool = tru
     #expect(config.staleLabelTimeout == 8)
 }
 
-@Test func markOverduePutsLabeledTrackFirst() {
+@Test func markOverduePutsDueLabeledTrackFirst() {
     var s = EmbedSchedule()
     let config = LensConfig(embedInterval: 0.25, reverifyInterval: 1, maxEmbedsPerFrame: 1)
     _ = s.select([candidate(1, labeled: true)], now: 0, config: config)
     s.markOverdue(TrackID(1))
-    #expect(s.select([candidate(2), candidate(1, labeled: true)], now: 0.05, config: config) == [TrackID(1)])
+    // Once due (past embedInterval), the promoted labeled track beats a never-attempted newcomer.
+    #expect(s.select([candidate(2), candidate(1, labeled: true)], now: 0.3, config: config) == [TrackID(1)])
+}
+
+@Test func markOverdueDoesNotBypassEmbedInterval() {
+    var s = EmbedSchedule()
+    let config = LensConfig(embedInterval: 0.25, reverifyInterval: 1, maxEmbedsPerFrame: 1)
+    _ = s.select([candidate(1, labeled: true)], now: 0, config: config)
+    s.markOverdue(TrackID(1))
+    // Throttled: still within embedInterval, so overdue does not make it due.
+    #expect(s.select([candidate(1, labeled: true)], now: 0.05, config: config).isEmpty)
+    #expect(s.select([candidate(1, labeled: true)], now: 0.2, config: config).isEmpty)
+    #expect(s.select([candidate(1, labeled: true)], now: 0.25, config: config) == [TrackID(1)])
+}
+
+@Test func markOverdueRaisesPriorityOnceDue() {
+    var s = EmbedSchedule()
+    let config = LensConfig(embedInterval: 0.25, reverifyInterval: 10, maxEmbedsPerFrame: 1)
+    _ = s.select([candidate(1, labeled: true)], now: 0, config: config)
+    _ = s.select([candidate(2)], now: 0, config: config)  // same attempt time, unlabeled
+    s.markOverdue(TrackID(1))
+    let both = [candidate(1, labeled: true), candidate(2)]
+    // Both due at 0.3; the overdue labeled track outranks the unlabeled one.
+    #expect(s.select(both, now: 0.3, config: config) == [TrackID(1)])
+    // The attempt consumed the promotion: the unlabeled track goes next.
+    #expect(s.select(both, now: 0.6, config: config) == [TrackID(2)])
+}
+
+@Test func withoutMarkOverdueLabeledTrackRanksBelowUnlabeled() {
+    var s = EmbedSchedule()
+    let config = LensConfig(embedInterval: 0.25, reverifyInterval: 10, maxEmbedsPerFrame: 1)
+    _ = s.select([candidate(1, labeled: true)], now: 0, config: config)
+    _ = s.select([candidate(2)], now: 0, config: config)
+    #expect(s.select([candidate(1, labeled: true), candidate(2)], now: 0.3, config: config) == [TrackID(2)])
+}
+
+@Test func markOverdueIsDroppedWithRetiredTrack() {
+    var s = EmbedSchedule()
+    let config = LensConfig(embedInterval: 0.25, reverifyInterval: 10, maxEmbedsPerFrame: 1)
+    _ = s.select([candidate(1, labeled: true)], now: 0, config: config)
+    s.markOverdue(TrackID(1))
+    s.retain(only: [])
+    #expect(s.trackedCount == 0)
+    // A new track reusing the id is not promoted.
+    _ = s.select([candidate(1, labeled: true)], now: 1, config: config)
+    _ = s.select([candidate(2)], now: 1, config: config)
+    #expect(s.select([candidate(1, labeled: true), candidate(2)], now: 1.3, config: config) == [TrackID(2)])
 }

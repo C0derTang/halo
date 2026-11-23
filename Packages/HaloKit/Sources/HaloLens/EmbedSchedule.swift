@@ -8,7 +8,9 @@ import HaloCore
 /// - A track is due when it has never been attempted or its last attempt is `>= embedInterval` ago.
 /// - Priority, highest first: labeled tracks overdue for re-verification (last attempt
 ///   `>= reverifyInterval` ago), then unlabeled tracks, then other labeled tracks. Ties go to the
-///   longest-waiting track, then the lowest TrackID, so the order is deterministic.
+///   longest-waiting track, then the lowest TrackID, so the order is deterministic. `markOverdue`
+///   also puts a labeled track in the top tier, but only changes priority: the `embedInterval`
+///   throttle still applies.
 /// - At most `maxEmbedsPerFrame` are selected; their attempt time is recorded on selection.
 struct EmbedSchedule: Sendable {
     struct Candidate: Sendable {
@@ -19,6 +21,8 @@ struct EmbedSchedule: Sendable {
 
     private var lastAttempt: [TrackID: TimeInterval] = [:]
     private var lastEvidence: [TrackID: TimeInterval] = [:]
+    /// Labeled tracks promoted to the top tier until their next attempt.
+    private var overdue: Set<TrackID> = []
 
     /// Selects which tracks to embed this frame and records the attempts.
     mutating func select(_ candidates: [Candidate], now: TimeInterval, config: LensConfig) -> [TrackID] {
@@ -37,7 +41,7 @@ struct EmbedSchedule: Sendable {
             }
             let tier: Int
             if c.labeled {
-                tier = waited >= config.reverifyInterval ? 0 : 2
+                tier = (waited >= config.reverifyInterval || overdue.contains(c.id)) ? 0 : 2
             } else {
                 tier = 1
             }
@@ -49,14 +53,17 @@ struct EmbedSchedule: Sendable {
             return $0.id.rawValue < $1.id.rawValue
         }
         let chosen = ranked.prefix(budget).map(\.id)
-        for id in chosen { lastAttempt[id] = now }
+        for id in chosen {
+            lastAttempt[id] = now
+            overdue.remove(id)
+        }
         return chosen
     }
 
-    /// Makes the track due immediately, as if it had never been attempted. For a labeled track this
-    /// puts it in the top (overdue re-verify) tier on the next selection.
+    /// Promotes a labeled track to the top (overdue re-verify) tier for its next selection. Priority
+    /// only: it does not make the track due, so the `embedInterval` throttle is never bypassed.
     mutating func markOverdue(_ id: TrackID) {
-        lastAttempt[id] = nil
+        overdue.insert(id)
     }
 
     /// A successful embedding produced evidence (a match result) for the track.
@@ -74,6 +81,7 @@ struct EmbedSchedule: Sendable {
     mutating func retain(only live: Set<TrackID>) {
         lastAttempt = lastAttempt.filter { live.contains($0.key) }
         lastEvidence = lastEvidence.filter { live.contains($0.key) }
+        overdue = overdue.filter { live.contains($0) }
     }
 
     var trackedCount: Int { Set(lastAttempt.keys).union(lastEvidence.keys).count }

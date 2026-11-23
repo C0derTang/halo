@@ -64,3 +64,16 @@ import Testing
         #expect(try leftovers(in: dir).isEmpty)
     }
 }
+
+@Suite struct SecureFileWriterDirectorySyncTests {
+    @Test func succeedsAndLeavesNoTempFilesAfterDirectoryFsync() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("halo-dirsync-\(UUID())")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("out.halodigest")
+        try SecureFileWriter.write(Data("a".utf8), to: url)
+        try SecureFileWriter.write(Data("b".utf8), to: url)
+        #expect(try Data(contentsOf: url) == Data("b".utf8))
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dir.path) == ["out.halodigest"])
+    }
+}

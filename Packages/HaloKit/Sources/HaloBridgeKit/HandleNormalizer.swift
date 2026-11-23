@@ -20,6 +20,11 @@ public struct HandleNormalizer: Sendable {
         self.defaultCountryCode = defaultCountryCode
     }
 
+    /// ISO 3166-1 alpha-2 region -> E.164 calling code (no "+"). The supported set is deliberately
+    /// small and fixed: add a region only with its code verified, because a wrong code can make a
+    /// handle collide with another person's number (invariant 4). Anything not listed, including
+    /// "ZZ" (unknown region), is unknown: national-format numbers stay unnormalized.
+    /// Shared calling codes (US and CA are both "1") are intentional.
     static let callingCodes = [
         "US": "1", "CA": "1", "GB": "44", "AU": "61", "DE": "49", "FR": "33", "IN": "91",
         "JP": "81", "CN": "86", "MX": "52", "BR": "55", "ES": "34", "IT": "39", "NL": "31",
