@@ -133,6 +133,7 @@ markdown, so any agent can follow them by reading the file:
 | `dispatch-wave` | master | Fan out builders for a wave, run reviewers, merge loop |
 | `build-issue` | builder | Implement one issue end-to-end and open the PR |
 | `review-pr` | reviewer | Read-only review returning APPROVE / REQUEST_CHANGES |
+| `merge-when-green` | master | Wait for CI on approved PRs, retry runner failures, squash-merge |
 | `close-wave` | master | Post-wave cleanup and integrated-main verification |
 | `new-skill` | master | Capture a newly repeated procedure as a skill |
 
