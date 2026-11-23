@@ -1,9 +1,14 @@
 import Foundation
 import HaloCore
+import HaloMatching
 
 // Synthetic fixtures only: hand-made or seeded-random vectors, no real faces.
 
 let space4 = EmbeddingSpace(modelID: "synthetic-4", dimension: 4)
+
+func makeMatcher(_ gallery: [FaceEmbedding], space: EmbeddingSpace = space4) -> GalleryMatcher {
+    GalleryMatcher(gallery: gallery, space: space)
+}
 
 func embedding(_ person: PersonID?, _ vector: [Float], space: EmbeddingSpace = space4) -> FaceEmbedding {
     FaceEmbedding(personID: person, space: space, vector: vector, source: .liveCapture, quality: 1)

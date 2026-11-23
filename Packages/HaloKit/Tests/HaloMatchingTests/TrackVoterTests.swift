@@ -70,22 +70,68 @@ private func feed(_ voter: inout TrackVoter, _ results: [MatchResult], trackID: 
     @Test func interruptedSwitchKeepsCurrentLabel() {
         var voter = TrackVoter(policy: policy)
         feed(&voter, [known(alice), known(alice), known(alice)])
-        let out = feed(&voter, [known(bob), known(bob), known(alice), known(bob), known(bob)])
+        let out = feed(&voter, [known(bob), known(bob), known(alice)])
         #expect(out.allSatisfy { isKnown($0, as: alice) })
-        #expect(isKnown(voter.record(known(bob), for: track), as: bob))
     }
 
-    @Test func labelSurvivesBriefDropoutButNotSustainedOne() {
+    @Test func briefDropoutKeepsLabel() {
         var voter = TrackVoter(policy: policy)
         feed(&voter, [known(alice), known(alice), known(alice)])
-        // Fewer than minVotes non-known frames: keep the name.
-        let brief = feed(&voter, [.unknown, .ambiguous, known(alice)])
-        #expect(brief.allSatisfy { isKnown($0, as: alice) })
-        // minVotes consecutive non-known frames (unknown and ambiguous both count): drop the name.
-        let sustained = feed(&voter, [.unknown, .ambiguous, .unknown])
-        #expect(isKnown(sustained[0], as: alice))
-        #expect(isKnown(sustained[1], as: alice))
-        #expect(sustained[2] == .unknown)
+        let out = feed(&voter, [.unknown, .ambiguous, known(alice)])
+        #expect(out.allSatisfy { isKnown($0, as: alice) })
+    }
+
+    @Test func periodicSingleDropoutsKeepLabel() {
+        var voter = TrackVoter(policy: policy)
+        feed(&voter, [known(alice), known(alice), known(alice)])
+        let pattern = [known(alice), known(alice), MatchResult.unknown]
+        let out = feed(&voter, Array(repeating: pattern, count: 5).flatMap { $0 })
+        #expect(out.allSatisfy { isKnown($0, as: alice) })
+    }
+
+    @Test func sustainedNonKnownDropsLabel() {
+        var voter = TrackVoter(policy: policy)
+        feed(&voter, [known(alice), known(alice), known(alice)])
+        // Unknown and ambiguous both count against the held name.
+        let out = feed(&voter, [.unknown, .ambiguous, .unknown])
+        #expect(isKnown(out[0], as: alice))
+        #expect(isKnown(out[1], as: alice))
+        #expect(out[2] == .unknown)
+    }
+
+    @Test func otherPersonMixedWithUnknownDropsLabel() {
+        var voter = TrackVoter(policy: policy)
+        feed(&voter, [known(alice), known(alice), known(alice)])
+        let out = feed(&voter, [known(bob), .unknown, known(bob)])
+        #expect(isKnown(out[0], as: alice))
+        #expect(isKnown(out[1], as: alice))
+        #expect(out[2] == .unknown)
+    }
+
+    @Test func otherPersonThenAmbiguousDropsLabel() {
+        var voter = TrackVoter(policy: policy)
+        feed(&voter, [known(alice), known(alice), known(alice)])
+        let out = feed(&voter, [known(bob), known(bob), .ambiguous])
+        #expect(isKnown(out[0], as: alice))
+        #expect(isKnown(out[1], as: alice))
+        #expect(out[2] == .unknown)
+    }
+
+    @Test func heldPersonLosingMajorityDropsLabel() {
+        var voter = TrackVoter(policy: policy)
+        feed(&voter, [known(alice), known(alice), known(alice)])
+        // Alice keeps resetting the off-streak, but is no longer a strict majority of the last 6.
+        let out = feed(&voter, [known(bob), known(bob), known(alice), known(bob), known(bob), known(alice)])
+        #expect(out[0...2].allSatisfy { isKnown($0, as: alice) })
+        #expect(out[3] == .unknown)
+        #expect(out[5] == .unknown)
+        #expect(voter.identity(for: track) == .unknown)
+    }
+
+    @Test func alternatingNeverLabels() {
+        var voter = TrackVoter(policy: policy)
+        let out = feed(&voter, Array(repeating: [known(alice), known(bob)], count: 10).flatMap { $0 })
+        #expect(out.allSatisfy { $0 == .unknown })
     }
 
     @Test func relabelAfterDropNeedsFreshVotes() {
