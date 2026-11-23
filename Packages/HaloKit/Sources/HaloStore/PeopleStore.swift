@@ -192,6 +192,7 @@ public final class PeopleStore: PeopleStoring, EnrollmentStoring, PrivacyStoring
         }
         try await write { db in
             for embedding in embeddings {
+                let faceBox = Self.sanitizedFaceBox(embedding.faceBox)
                 try db.execute(
                     sql: """
                         INSERT INTO embedding
@@ -217,10 +218,10 @@ public final class PeopleStore: PeopleStoring, EnrollmentStoring, PrivacyStoring
                         embedding.space.dimension, VectorCodec.encode(embedding.vector),
                         embedding.source.rawValue, embedding.sourceRef, Double(embedding.quality),
                         embedding.createdAt.storedValue,
-                        embedding.faceBox.map { Double($0.origin.x) },
-                        embedding.faceBox.map { Double($0.origin.y) },
-                        embedding.faceBox.map { Double($0.size.width) },
-                        embedding.faceBox.map { Double($0.size.height) },
+                        faceBox.map { Double($0.origin.x) },
+                        faceBox.map { Double($0.origin.y) },
+                        faceBox.map { Double($0.size.width) },
+                        faceBox.map { Double($0.size.height) },
                     ])
             }
             // An embedding that now belongs to someone can no longer sit in a suggestion cluster.
@@ -229,6 +230,20 @@ public final class PeopleStore: PeopleStoring, EnrollmentStoring, PrivacyStoring
                 try Self.detachFromClusters(assigned, in: db)
             }
         }
+    }
+
+    /// Normalized face boxes must be finite and inside [0,1] x [0,1]. On write a box is CLAMPED to the
+    /// unit square (the part inside it is kept); a box that is non-finite, empty, or entirely outside
+    /// is stored as nil. The box is optional display metadata, so a bad one never fails the write
+    /// (that would drop the embedding with it).
+    static func sanitizedFaceBox(_ box: CGRect?) -> CGRect? {
+        guard let box else { return nil }
+        let values = [box.origin.x, box.origin.y, box.size.width, box.size.height]
+        guard values.allSatisfy(\.isFinite), box.size.width > 0, box.size.height > 0 else { return nil }
+        if box.minX >= 0, box.minY >= 0, box.maxX <= 1, box.maxY <= 1 { return box }  // untouched
+        let clamped = box.intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
+        guard !clamped.isNull, clamped.width > 0, clamped.height > 0 else { return nil }
+        return clamped
     }
 
     // MARK: - Forget / erase

@@ -1,9 +1,15 @@
 import CoreGraphics
+import Foundation
 import HaloCore
 import HaloUI
 import Testing
 
 @testable import HaloAppCore
+
+@MainActor final class WhisperTestClock {
+    var date = Date(timeIntervalSince1970: 1_000_000)
+    func advance(_ seconds: TimeInterval) { date = date.addingTimeInterval(seconds) }
+}
 
 final class WhisperTestRoute: AudioRouteChecking, @unchecked Sendable {
     var outputs: [AudioOutput]
@@ -45,6 +51,7 @@ struct WhisperAnnouncerTests {
     let haptics = WhisperTestHaptics()
     let ada = PersonID()
     let ben = PersonID()
+    let clock = WhisperTestClock()
 
     func item(_ track: Int, _ person: PersonID?, name: String = "Ada", state: HologramState = .stable)
         -> LensOverlayItem
@@ -67,7 +74,8 @@ struct WhisperAnnouncerTests {
     ) -> WhisperAnnouncer {
         WhisperAnnouncer(
             settings: WhisperSettings(isEnabled: enabled, speaksChip: chip), route: route,
-            devices: InMemoryTrustedAudioDeviceStore(trusted), speech: speech, haptics: haptics)
+            devices: InMemoryTrustedAudioDeviceStore(trusted), speech: speech, haptics: haptics,
+            now: { [clock] in clock.date })
     }
 
     @Test func defaultsOff() {
@@ -187,8 +195,39 @@ struct WhisperAnnouncerTests {
         let a = make(route: WhisperTestRoute([whisperWired]))
         a.update([item(1, ada)])
         speech.finish(.interrupted)
+        clock.advance(WhisperAnnouncer.retryBackoff)
         a.update([item(1, ada)])
         #expect(speech.spoken.count == 2)
+    }
+
+    @Test func interruptedRetryWaitsForBackoff() {
+        let a = make(route: WhisperTestRoute([whisperWired]))
+        a.update([item(1, ada)])
+        speech.finish(.interrupted)
+        a.update([item(1, ada)])
+        #expect(speech.spoken.count == 1)
+        clock.advance(4.9)
+        a.update([item(1, ada)])
+        #expect(speech.spoken.count == 1)
+        clock.advance(0.2)
+        a.update([item(1, ada)])
+        #expect(speech.spoken.count == 2)
+    }
+
+    @Test func interruptedRetriesAreCappedPerSession() {
+        let a = make(route: WhisperTestRoute([whisperWired]))
+        for _ in 0..<WhisperAnnouncer.maxInterruptedAttempts + 2 {
+            a.update([item(1, ada)])
+            speech.finish(.interrupted)
+            clock.advance(WhisperAnnouncer.retryBackoff + 1)
+        }
+        a.update([item(1, ada)])
+        #expect(speech.spoken.count == WhisperAnnouncer.maxInterruptedAttempts)
+
+        // A new lens session starts fresh.
+        a.resetSession()
+        a.update([item(1, ada)])
+        #expect(speech.spoken.count == WhisperAnnouncer.maxInterruptedAttempts + 1)
     }
 
     @Test func disablingCancelsImmediately() {

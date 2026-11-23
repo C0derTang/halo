@@ -56,6 +56,9 @@ public actor MemoryHookRefresher {
     private var inputHashes: [PersonID: String] = [:]
     private var lastCompletedRun: Date?
     private var isRunning = false
+    /// Who was confirmed when the unconfirmed sweep last completed; nil until the first sweep (so the
+    /// first run after launch sweeps everyone). Memory only.
+    private var confirmedAtLastSweep: Set<PersonID>?
     /// Consecutive generation failures per person and when they may be retried. Memory only.
     private var failures: [PersonID: (count: Int, retryAfter: Date)] = [:]
 
@@ -107,14 +110,21 @@ public actor MemoryHookRefresher {
 
         var report = MemoryRefreshReport()
 
-        // A person who is no longer confirmed loses their generated hooks (invariant 3).
-        for person in people where !person.confirmed {
+        // A person who is no longer confirmed loses their generated hooks (invariant 3). The first run
+        // after launch sweeps every unconfirmed person; later runs only those who were confirmed at
+        // the last sweep (anyone else cannot have gained generated hooks since).
+        let sweepCandidates = people.filter {
+            !$0.confirmed && (confirmedAtLastSweep?.contains($0.id) ?? true)
+        }
+        for person in sweepCandidates {
             try Task.checkCancellation()
             let existing = try await store.hooks(for: person.id, now: now)
             guard existing.contains(where: { $0.source == .onDeviceSummary }) else { continue }
             try await store.replaceHooks(for: person.id, source: .onDeviceSummary, with: [])
             report.cleared.insert(person.id)
         }
+
+        confirmedAtLastSweep = confirmedIDs
 
         var pending: [(person: Person, messages: [InteractionDigest.DigestMessage], hash: String)] = []
         for person in confirmed {
@@ -167,11 +177,11 @@ public actor MemoryHookRefresher {
                 continue
             }
             try Task.checkCancellation()
-            // The model may have become unavailable mid-run: never wipe hooks because of that.
+            // The model may have become unavailable mid-run: never wipe hooks because of that. Stop
+            // without recording a failure (no backoff) and without counting the run for rate limiting,
+            // so the remaining people are retried as soon as the model is back.
             if generated.isEmpty, await !generator.isAvailable {
-                recordFailure(person.id, now: now)
-                report.failed.insert(person.id)
-                continue
+                return .completed(report)
             }
 
             // Re-apply the policy whatever the generator returned.

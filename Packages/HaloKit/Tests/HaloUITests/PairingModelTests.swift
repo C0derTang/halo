@@ -1,4 +1,6 @@
 import CoreGraphics
+import CoreImage
+import CoreImage.CIFilterBuiltins
 import Foundation
 import Testing
 
@@ -108,11 +110,30 @@ private struct StubAuth: Authenticating {
         #expect(model.qrImage == nil)
         await model.unlock()
         let image = try #require(model.qrImage)
-        // Corner pixel region is white padding: width is larger than the bare QR.
-        let bare = try #require(PairingQR.image(for: "payload-0", scale: 8))
-        #expect(image.width == bare.width)
-        #expect(image.width % 8 == 0)
+        // The bare code, generated independently of `PairingQR`, at the same integer scale.
+        let scale = 8
+        let filter = CIFilter.qrCodeGenerator()
+        filter.message = Data("payload-0".utf8)
+        filter.correctionLevel = "M"
+        let bareWidth = Int(try #require(filter.outputImage).extent.width) * scale
+        // Quiet zone: 4 modules on each side.
+        #expect(image.width == bareWidth + 8 * scale)
+        #expect(image.height == image.width)
+        #expect(try Self.pixel(image, x: 0, y: 0) == [255, 255, 255, 255])
         model.lock()
         #expect(model.qrImage == nil)
+    }
+
+    /// RGBA of the pixel at (x, y) from the top-left, drawn into a known sRGB layout.
+    static func pixel(_ image: CGImage, x: Int, y: Int) throws -> [UInt8] {
+        var data = [UInt8](repeating: 0, count: image.width * image.height * 4)
+        let context = try #require(
+            CGContext(
+                data: &data, width: image.width, height: image.height, bitsPerComponent: 8,
+                bytesPerRow: image.width * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        let offset = (y * image.width + x) * 4  // bitmap rows start at the top
+        return Array(data[offset..<offset + 4])
     }
 }

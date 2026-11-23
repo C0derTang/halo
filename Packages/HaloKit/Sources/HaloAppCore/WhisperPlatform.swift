@@ -70,7 +70,11 @@ public final class SystemWhisperSpeech: NSObject, WhisperSpeaking, AVSpeechSynth
         gate = WhisperUtteranceGate(timeout: timeout)
         super.init()
         synthesizer.delegate = self
-        gate.onTimeout = { [weak self] in self?.synthesizer.stopSpeaking(at: .immediate) }
+        gate.onTimeout = { [weak self] in
+            // The utterance is abandoned: drop its bookkeeping so `ids` cannot grow.
+            self?.ids.removeAll()
+            self?.synthesizer.stopSpeaking(at: .immediate)
+        }
     }
 
     public func speak(_ text: String, completion: @escaping @MainActor (WhisperSpeechResult) -> Void) {
@@ -81,6 +85,7 @@ public final class SystemWhisperSpeech: NSObject, WhisperSpeaking, AVSpeechSynth
 
     public func stop() {
         gate.cancel()
+        ids.removeAll()
         synthesizer.stopSpeaking(at: .immediate)
     }
 

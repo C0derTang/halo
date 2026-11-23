@@ -238,10 +238,42 @@ import Testing
         let lossy = LosesAvailabilityGenerator(inner: generator)
         let refresher = MemoryHookRefresher(store: store, generator: lossy)
 
-        let report = try report(try await refresher.refresh(now: t0))
+        let first = try report(try await refresher.refresh(now: t0))
 
-        #expect(report.failed == [ana.id])
+        #expect(first.failed.isEmpty)
+        #expect(first.regenerated.isEmpty)
         #expect(await store.allHooks(for: ana.id).map(\.text) == ["Old summary"])
+
+        // Not counted for rate limiting: the next call reaches the availability check (not
+        // `.rateLimited`), and no failure was recorded.
+        #expect(try await refresher.refresh(now: t0.addingTimeInterval(1)) == .modelUnavailable)
+
+        // A fresh refresher shows nobody is backing off: the cached failures were never set.
+        let healthy = MemoryHookRefresher(store: store, generator: generator, minimumInterval: 0)
+        await generator.setTexts(["Started a new job at Acme"])
+        #expect(try report(try await healthy.refresh(now: t0.addingTimeInterval(2))).regenerated == [ana.id])
+    }
+
+    @Test func unconfirmedSweepIsFullOnFirstRunThenNarrow() async throws {
+        let (store, generator, ana, ben) = await makeWorld()
+        let refresher = MemoryHookRefresher(store: store, generator: generator, minimumInterval: 0)
+
+        _ = try await refresher.refresh(now: t0)
+        #expect(await store.hookReads.contains(ben.id))
+
+        // Second run: Ben was never confirmed, so nobody needs sweeping.
+        await store.resetHookReads()
+        _ = try await refresher.refresh(now: t0.addingTimeInterval(1))
+        #expect(await store.hookReads.isEmpty)
+
+        // Ana loses confirmation: swept (and cleared) once, then left alone.
+        await store.setConfirmed(ana.id, false)
+        let cleared = try report(try await refresher.refresh(now: t0.addingTimeInterval(2)))
+        #expect(cleared.cleared == [ana.id])
+        #expect(await store.hookReads == [ana.id])
+        await store.resetHookReads()
+        _ = try await refresher.refresh(now: t0.addingTimeInterval(3))
+        #expect(await store.hookReads.isEmpty)
     }
 
     @Test func noDigestIsANoOp() async throws {
