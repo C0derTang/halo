@@ -46,17 +46,21 @@ public enum SecureFileWriter {
             guard fchmod(fd, 0o600) == 0 else {
                 throw SecureFileWriterError.posix(operation: "chmod", path: temp.path, code: errno)
             }
-            try data.withUnsafeBytes { (buf: UnsafeRawBufferPointer) throws(SecureFileWriterError) in
+            // Non-throwing closure: typed throws through `withUnsafeBytes` needs Swift 6.3+.
+            var writeError: SecureFileWriterError?
+            data.withUnsafeBytes { (buf: UnsafeRawBufferPointer) in
                 var offset = 0
                 while offset < buf.count {
                     let n = Darwin.write(fd, buf.baseAddress! + offset, buf.count - offset)
                     if n < 0 {
                         if errno == EINTR { continue }
-                        throw .posix(operation: "write", path: temp.path, code: errno)
+                        writeError = .posix(operation: "write", path: temp.path, code: errno)
+                        return
                     }
                     offset += n
                 }
             }
+            if let writeError { throw writeError }
             guard fsync(fd) == 0 else {
                 throw SecureFileWriterError.posix(operation: "fsync", path: temp.path, code: errno)
             }
