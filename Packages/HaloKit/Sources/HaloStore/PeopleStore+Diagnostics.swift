@@ -74,6 +74,14 @@ extension PeopleStore {
         }
     }
 
+    /// Drops a cluster's member rows WITHOUT the usual repair, leaving a stale memberless record
+    /// (the state `confirm` must tolerate defensively).
+    func simulateStaleClusterRecord(_ clusterID: String) async throws {
+        try await writer.write { db in
+            try db.execute(sql: "DELETE FROM cluster_member WHERE clusterId = ?", arguments: [clusterID])
+        }
+    }
+
     /// Opens a read transaction on a reader connection (pinning the current WAL snapshot) and keeps
     /// it open on a background thread until `release()` is called on the returned handle.
     func holdReadTransaction() -> HeldReadTransaction {

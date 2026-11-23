@@ -7,6 +7,9 @@ enum Schema {
     static let embedding = "embedding"
     static let digest = "digest"
     static let recognitionLog = "recognition_log"
+    static let cluster = "cluster"
+    static let clusterMember = "cluster_member"
+    static let scanState = "scan_state"
 
     /// Every table that can hold a row about a specific person (by `personId`).
     static let personScopedTables = [identity, embedding, recognitionLog]
@@ -62,6 +65,36 @@ enum Schema {
                         at REAL NOT NULL
                     );
                     CREATE INDEX recognition_log_personId ON recognition_log(personId);
+                    """)
+        }
+        migrator.registerMigration("v2") { db in
+            // Clustering suggestions awaiting triage (invariant 3: suggestion only).
+            // `suggestedPersonId` cascades as a backstop, but `forget` deletes these clusters AND their
+            // member embeddings explicitly; the cascade alone would leave the members behind.
+            // `representativeId` is maintained by the store (always one of the cluster's members).
+            // Each embedding belongs to at most one cluster; deleting it removes the membership.
+            try db.execute(
+                sql: """
+                    CREATE TABLE cluster (
+                        id TEXT PRIMARY KEY NOT NULL,
+                        position INTEGER NOT NULL,
+                        representativeId TEXT NOT NULL,
+                        suggestedPersonId TEXT REFERENCES person(id) ON DELETE CASCADE,
+                        cohesion REAL NOT NULL
+                    );
+                    CREATE INDEX cluster_suggestedPersonId ON cluster(suggestedPersonId);
+
+                    CREATE TABLE cluster_member (
+                        clusterId TEXT NOT NULL REFERENCES cluster(id) ON DELETE CASCADE,
+                        embeddingId TEXT NOT NULL UNIQUE REFERENCES embedding(id) ON DELETE CASCADE,
+                        position INTEGER NOT NULL,
+                        PRIMARY KEY (clusterId, embeddingId)
+                    );
+
+                    CREATE TABLE scan_state (
+                        id INTEGER PRIMARY KEY NOT NULL CHECK (id = 1),
+                        cursor TEXT NOT NULL
+                    );
                     """)
         }
         return migrator
