@@ -21,6 +21,7 @@ import Testing
         let alice = try await h.store.seedConfirmed("Synthetic Alice", vector: aliceVector)
         try await h.store.base.addIdentity(Identity(personID: alice.id, kind: .phone, value: alicePhone))
         await h.environment.start()
+        await h.unlock()
         await h.environment.lensAppeared()
         let lens = try #require(h.environment.lens)
         try await h.deliverFrames { lens.items.first?.label?.title == "Synthetic Alice" }
@@ -42,6 +43,7 @@ import Testing
     @Test func theLensDrivesTheEnvironmentsOneCamera() async throws {
         let h = try EnvHarness()
         await h.environment.start()
+        await h.unlock()
         let lens = try #require(h.environment.lens)
         #expect(lens.recognitionAvailable)
 
@@ -69,6 +71,7 @@ import Testing
     @Test func missingModelRunsThePreviewWithoutRecognition() async throws {
         let h = try EnvHarness(modelMissing: true)
         await h.environment.start()
+        await h.unlock()
         let lens = try #require(h.environment.lens)
         #expect(!lens.recognitionAvailable)
         await h.environment.lensAppeared()
@@ -347,6 +350,8 @@ import Testing
         async throws
     {
         let h = try EnvHarness(permissions: [.photos: photos], onboardingCompleted: completed)
+        // A scan has run before (its content is opaque to the environment).
+        try await h.store.base.setScanCursor("synthetic-cursor")
         await h.environment.start()
         if resumes {
             try await waitUntil { h.log.count("scan.list") == 1 }
@@ -358,5 +363,149 @@ import Testing
         // Never prompts on launch.
         #expect(h.permissions.requested.isEmpty)
         #expect(h.environment.needsOnboarding == !completed)
+    }
+
+    @Test func scanDoesNotResumeWithoutACursor() async throws {
+        let h = try EnvHarness(permissions: [.photos: .granted], onboardingCompleted: true)
+        await h.environment.start()
+        try await Task.sleep(for: .milliseconds(30))
+        #expect(h.log.count("scan.list") == 0)
+        #expect(h.environment.scanStatus == .idle)
+    }
+
+    @Test func killSwitchIsNotUndoneOnTheNextLaunch() async throws {
+        let first = try EnvHarness(permissions: [.photos: .granted], onboardingCompleted: true)
+        try await first.store.base.setScanCursor("synthetic-cursor")
+        await first.environment.start()
+        try await waitUntil { first.log.count("scan.list") == 1 }
+        #expect(await first.environment.privacy.eraseEverything(typed: PrivacySettingsViewModel.eraseKeyword))
+        #expect(try await first.store.scanCursor() == nil)
+        #expect(first.environment.scanStatus == .idle)
+
+        // Next launch: same store, onboarding still complete, Photos still granted.
+        let store = first.store
+        let second = try EnvHarness(
+            openStore: { store }, permissions: [.photos: .granted], onboardingCompleted: true)
+        await second.environment.start()
+        try await Task.sleep(for: .milliseconds(30))
+        #expect(second.log.count("scan.list") == 0)
+        #expect(second.environment.scanStatus == .idle)
+        #expect(try await store.unassignedEmbeddings(space: envSpace).isEmpty)
+    }
+
+    // MARK: Lock
+
+    @Test func lensWaitsForUnlockAndNeverRunsWhileLocked() async throws {
+        let h = try EnvHarness()
+        let alice = try await h.store.seedConfirmed("Synthetic Alice", vector: aliceVector)
+        await h.environment.start()
+        #expect(h.environment.appLock.isLocked)
+        await h.environment.lensAppeared()
+        await h.environment.startLens()
+        try await Task.sleep(for: .milliseconds(20))
+        // Behind the cover: no capture, no recognition, nothing logged.
+        #expect(h.log.count("camera.start") == 0)
+        #expect(!h.environment.isLensRunning)
+        #expect(try await h.store.recognitionLog(for: alice.id).isEmpty)
+
+        await h.unlock()
+        try await waitUntil { h.camera.isRunning && h.environment.isLensRunning }
+    }
+
+    // MARK: Digest queue vs. kill switch
+
+    @Test func queuedDigestImportsAndKillSwitchSaveNothingAfterErase() async throws {
+        let h = try EnvHarness()
+        await h.environment.start()
+        let gate = EnvGate()
+        h.store.saveDigestGate.withLock { $0 = gate }
+        let now = Date()
+        let firstURL = try h.digestFile(Self.digest(handle: Self.alicePhone, now: now))
+        let secondURL = try h.digestFile(Self.digest(handle: "+12025550199", now: now.addingTimeInterval(60)))
+
+        let first = Task { await h.environment.importDigest(url: firstURL) }
+        try await waitUntil { h.log.count("store.saveDigest") == 1 }
+        let second = Task { await h.environment.importDigest(url: secondURL) }
+        try await Task.sleep(for: .milliseconds(10))  // queued behind the first
+
+        let erase = Task {
+            await h.environment.privacy.eraseEverything(typed: PrivacySettingsViewModel.eraseKeyword)
+        }
+        try await Task.sleep(for: .milliseconds(30))
+        #expect(h.log.count("store.erase") == 0)  // waiting for the write in flight
+        gate.open()
+
+        #expect(await erase.value)
+        _ = await first.value
+        // The queued import was requested before the kill switch: dropped, never run after it.
+        #expect(await second.value == false)
+        #expect(h.log.count("store.saveDigest") == 1)
+        #expect(!FileManager.default.fileExists(atPath: secondURL.path))
+        let eraseIndex = try #require(h.log.index("store.erase"))
+        if let saved = h.log.index("store.saveDigest.done") { #expect(saved < eraseIndex) }
+        #expect(try await h.store.latestDigest() == nil)
+        #expect(h.environment.digestTask == nil)
+        #expect(h.environment.digestQueue == nil)
+
+        // The queue is not wedged: a new import after the erase runs.
+        h.store.saveDigestGate.withLock { $0 = nil }
+        let thirdURL = try h.digestFile(
+            Self.digest(handle: Self.alicePhone, now: now.addingTimeInterval(120)))
+        #expect(await h.environment.importDigest(url: thirdURL))
+        #expect(try await h.store.latestDigest() != nil)
+    }
+
+    @Test func contactsImportRequestedBeforeAKillSwitchIsDropped() async throws {
+        let h = try EnvHarness(contacts: [
+            ContactRecord(identifier: "synthetic-contact-7", givenName: "Synthetic", familyName: "Ash")
+        ])
+        let alice = try await h.store.seedConfirmed("Synthetic Alice", vector: aliceVector)
+        await h.environment.start()
+        // A forget holds the import back; a kill switch then starts before it may run.
+        let gate = EnvGate()
+        h.store.forgetGate.withLock { $0 = gate }
+        let forget = Task { try await h.environment.store.forget(alice.id) }
+        try await waitUntil { h.log.count("store.forget") == 1 }
+        let contacts = Task { try await h.environment.importContacts() }
+        try await Task.sleep(for: .milliseconds(10))
+        let erase = Task {
+            await h.environment.privacy.eraseEverything(typed: PrivacySettingsViewModel.eraseKeyword)
+        }
+        try await Task.sleep(for: .milliseconds(10))
+        gate.open()
+        _ = try? await forget.value  // the person may already be gone (erased)
+        #expect(await erase.value)
+        await #expect(throws: CancellationError.self) { _ = try await contacts.value }
+        #expect(h.log.count("store.upsert") == 0)
+        #expect(try await h.store.allPeople().isEmpty)
+    }
+
+    // MARK: Label identity cache
+
+    @Test func lensLabelStoreReadsStoreWideIdentitiesOncePerChange() async throws {
+        let fake = LensFakeStore()
+        let a = Person(displayName: "Synthetic A", confirmed: true)
+        let b = Person(displayName: "Synthetic B", confirmed: true)
+        fake.add(a, identities: [Identity(personID: a.id, kind: .phone, value: "+12025550101")])
+        fake.add(b, identities: [Identity(personID: b.id, kind: .phone, value: "+12025550102")])
+        let labels = LensLabelStore(base: fake)
+
+        #expect(try await labels.identities(for: a.id).count == 2)
+        #expect(try await labels.identities(for: b.id).count == 2)
+        #expect(fake.identityLookups.count == 2)  // one read of each person, not one per label
+
+        labels.invalidate()
+        _ = try await labels.identities(for: a.id)
+        #expect(fake.identityLookups.count == 4)
+    }
+
+    @Test func identityChangesInvalidateTheLensLabelCache() async throws {
+        let h = try EnvHarness()
+        let alice = try await h.store.seedConfirmed("Synthetic Alice", vector: aliceVector)
+        await h.environment.start()
+        #expect(try await h.environment.lensLabels.identities(for: alice.id).isEmpty)
+        try await h.environment.store.addIdentity(
+            Identity(personID: alice.id, kind: .phone, value: Self.alicePhone))
+        #expect(try await h.environment.lensLabels.identities(for: alice.id).count == 1)
     }
 }

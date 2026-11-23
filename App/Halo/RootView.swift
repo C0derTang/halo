@@ -33,21 +33,13 @@ struct RootView: View {
         }
         .fullScreenCover(isPresented: $showsOnboarding) {
             OnboardingView(model: environment.makeOnboardingModel()) { showsOnboarding = false }
+                // While the cover is up only it can present, so the result alert lives here too.
+                .digestResultAlert($digestMessage, isEnabled: true)
         }
         // `.halodigest` opened from Files / AirDrop: the system hands the app its own Inbox copy,
         // which the importer deletes afterwards.
         .onOpenURL { url in importDigest(url) }
-        .alert(
-            "iMessage digest",
-            isPresented: Binding(
-                get: { digestMessage != nil },
-                set: { if !$0 { digestMessage = nil } })
-        ) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            // Counts or an error only; never digest content.
-            Text(digestMessage ?? "")
-        }
+        .digestResultAlert($digestMessage, isEnabled: !showsOnboarding)
         // Above sheets, alerts and the onboarding cover (a separate window).
         .lifecyclePrivacyCover(environment.appLock)
         .onChange(of: scenePhase, initial: true) { _, phase in
@@ -58,8 +50,28 @@ struct RootView: View {
     private func importDigest(_ url: URL) {
         guard url.isFileURL, url.pathExtension.lowercased() == "halodigest" else { return }
         Task {
-            await environment.importDigest(url: url)
-            digestMessage = environment.digestImport.message
+            if await environment.importDigest(url: url) {
+                digestMessage = environment.digestImport.message
+            } else {
+                digestMessage = "The digest was not imported because all Halo data was erased."
+            }
+        }
+    }
+}
+
+extension View {
+    /// The `.halodigest` import result. Counts or an error only; never digest content. Exactly one
+    /// presenter is enabled at a time (the onboarding cover while it is up, else the root).
+    fileprivate func digestResultAlert(_ message: Binding<String?>, isEnabled: Bool) -> some View {
+        alert(
+            "iMessage digest",
+            isPresented: Binding(
+                get: { isEnabled && message.wrappedValue != nil },
+                set: { if !$0 { message.wrappedValue = nil } })
+        ) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(message.wrappedValue ?? "")
         }
     }
 }

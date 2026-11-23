@@ -346,6 +346,11 @@ struct EnvHarness {
         self.onboarding = onboarding
     }
 
+    /// The app starts locked; the lens only runs once unlocked (the fake authenticator succeeds).
+    func unlock() async {
+        #expect(await environment.appLock.unlock())
+    }
+
     var camera: EnvFakeCamera {
         // `makeCamera` above always builds one.
         environment.camera as! EnvFakeCamera

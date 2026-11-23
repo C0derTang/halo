@@ -83,11 +83,19 @@ extension AppEnvironment {
     }
 
     /// On launch: picks the photo scan back up (from its persisted cursor, or for photos added
-    /// since the last pass) only when the user already consented: onboarding is complete and
-    /// Photos access is granted (full or limited). Never prompts.
+    /// since the last pass) only when
+    /// - the user already consented: onboarding is complete and Photos access is granted (full or
+    ///   limited); this never prompts;
+    /// - a scan has run before: the store has a scan cursor. The kill switch deletes the cursor, so
+    ///   an erase is never undone by rescanning the library on the next launch; after it, only an
+    ///   explicit "Scan photos" starts a scan again;
+    /// - no forget / erase is in flight.
     func resumePhotoScanIfConsented() async {
         guard dependencies.onboarding.isCompleted, recognition != .unavailable else { return }
         guard await dependencies.permissions.status(for: .photos).allowsUse else { return }
+        // `try?` flattens: nil when unreadable or when there is no cursor.
+        guard (try? await store.scanCursor()) != nil else { return }
+        guard destructiveOperations == 0 else { return }
         startPhotoScan()
     }
 }

@@ -19,6 +19,7 @@ import Testing
         let h = try EnvHarness()
         try await h.store.seedConfirmed("Synthetic Alice", vector: aliceVector)
         await h.environment.start()
+        await h.unlock()
         #expect(h.environment.galleryPersonCount == 1)
         await h.environment.startLens()
         #expect(h.environment.isLensRunning)
@@ -165,6 +166,7 @@ import Testing
     @Test func backgroundPausesScanStopsCameraAndFlushes() async throws {
         let h = try EnvHarness()
         await h.environment.start()
+        await h.unlock()
         await h.environment.startLens()
         try await h.startBlockedScan()
 
@@ -237,6 +239,7 @@ import Testing
         let cameraGate = EnvGate()
         let h = try EnvHarness(cameraStartGate: cameraGate)
         await h.environment.start()
+        await h.unlock()
         let first = Task { await h.environment.startLens() }
         let second = Task { await h.environment.startLens() }
         try await waitUntil { h.log.count("camera.start") == 1 && h.environment.isLensRunning }
@@ -257,6 +260,7 @@ import Testing
         let cameraGate = EnvGate()
         let h = try EnvHarness(cameraStartGate: cameraGate)
         await h.environment.start()
+        await h.unlock()
         let start = Task { await h.environment.startLens() }
         try await waitUntil { h.log.count("camera.start") == 1 }
 

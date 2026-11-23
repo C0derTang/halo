@@ -1,6 +1,7 @@
 import Foundation
 import HaloCore
 import HaloLens
+import Synchronization
 
 #if os(iOS)
     import AVFoundation
@@ -22,15 +23,42 @@ import HaloLens
 /// guard). The lens builds labels from `identities(for:)`, so it gets every identity here, exactly
 /// like `PersonDetailModel` and `AppEnvironment.label(for:)`: the lens and the detail screen's
 /// "label preview" can never disagree. Everything else is forwarded unchanged.
-struct LensLabelStore: PeopleStoring, PrivacyStoring {
+///
+/// The store-wide set is read once and cached until `invalidate()`, which the environment calls on
+/// every identity change (confirm, forget, erase, imports, edits), so building the labels of N
+/// people on screen does not re-read every person's identities N times. A read that started
+/// before an invalidation never fills the cache.
+final class LensLabelStore: PeopleStoring, PrivacyStoring {
     let base: any PeopleStoring & PrivacyStoring
 
+    private struct Cache {
+        var generation = 0
+        var identities: [Identity]?
+    }
+    private let cache = Mutex(Cache())
+
+    init(base: any PeopleStoring & PrivacyStoring) {
+        self.base = base
+    }
+
+    /// Identities changed: the next label build re-reads them.
+    func invalidate() {
+        cache.withLock {
+            $0.generation += 1
+            $0.identities = nil
+        }
+    }
+
     func identities(for id: PersonID) async throws -> [Identity] {
+        let (generation, cached) = cache.withLock { ($0.generation, $0.identities) }
+        if let cached { return cached }
         var all: [Identity] = []
         for person in try await base.allPeople() {
             all += try await base.identities(for: person.id)
         }
-        return all
+        let fresh = all
+        cache.withLock { if $0.generation == generation { $0.identities = fresh } }
+        return fresh
     }
 
     func person(_ id: PersonID) async throws -> Person? { try await base.person(id) }

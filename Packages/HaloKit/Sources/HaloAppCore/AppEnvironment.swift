@@ -102,15 +102,23 @@ public final class AppEnvironment {
     @ObservationIgnored private var lifecycleChain: Task<Void, Never>?
     /// Forgets / erases in progress. The scan does not (re)start and imports do not start while any
     /// is running.
-    @ObservationIgnored private var destructiveOperations = 0
+    @ObservationIgnored private(set) var destructiveOperations = 0
     /// The kill switch is running: the lens does not (re)start.
     @ObservationIgnored private var isErasing = false
     /// Imports parked until the running forget / erase has finished.
     @ObservationIgnored private var destructiveWaiters: [CheckedContinuation<Void, Never>] = []
     /// Running contacts import (onboarding or Settings). Owned here so forget / erase can stop it.
     @ObservationIgnored var contactsTask: Task<ContactsImportResult, any Error>?
-    /// Running `.halodigest` import. Owned here so forget / erase can stop it.
+    /// The `.halodigest` import currently writing (at most one). Owned here so forget / erase can
+    /// stop it.
     @ObservationIgnored var digestTask: Task<Void, Never>?
+    /// Tail of the queue of requested digest imports (they run one at a time, in order).
+    @ObservationIgnored var digestQueue: Task<Bool, Never>?
+    /// Bumped by every kill switch. An import requested before an erase that has not started
+    /// writing when the erase begins is dropped, never run afterwards.
+    @ObservationIgnored private(set) var eraseGeneration = 0
+    /// Lens label source with a cached store-wide identity set, invalidated on identity changes.
+    @ObservationIgnored let lensLabels: LensLabelStore
     /// Progress subscribers (onboarding). Finished when the scan is over (not when it pauses).
     @ObservationIgnored private var scanObservers: [UUID: AsyncStream<ScanProgress>.Continuation] = [:]
     /// The Lens tab is on screen: the lens restarts on `.active` and after the kill switch.
@@ -147,9 +155,33 @@ public final class AppEnvironment {
                 normalization: HandleNormalization(normalizer: normalizer)))
 
         camera = dependencies.makeCamera()
+        lensLabels = LensLabelStore(base: store)
 
         isStoreAvailable = lazyStore.openIfNeeded()
         store.setDelegate(self)
+        observeAppLock()
+    }
+
+    /// Stops the lens whenever the app locks and restarts it (if on screen) once unlocked: nothing
+    /// is captured, recognized or logged behind the privacy cover.
+    private func observeAppLock() {
+        withObservationTracking {
+            _ = appLock.isLocked
+        } onChange: { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                self.appLockChanged()
+                self.observeAppLock()
+            }
+        }
+    }
+
+    private func appLockChanged() {
+        if appLock.isLocked {
+            stopLens()
+        } else if lensVisible {
+            Task { await startLens() }
+        }
     }
 
     /// The real app.
@@ -222,7 +254,7 @@ public final class AppEnvironment {
     private func makeLens(source: any LensTrackSource, recognitionAvailable: Bool) -> LensScreenModel? {
         guard let camera else { return nil }
         return LensScreenModel(
-            source: source, camera: camera, store: LensLabelStore(base: store), ranker: labelRanker,
+            source: source, camera: camera, store: lensLabels, ranker: labelRanker,
             recognitionAvailable: recognitionAvailable)
     }
 
@@ -315,11 +347,12 @@ public final class AppEnvironment {
         stopLens()
     }
 
-    /// Starts a lens session (camera on, frames to the pipeline off the main actor). Refused in the
-    /// background and during the kill switch. A `stopLens()` while the camera is coming up wins
-    /// (`LensScreenModel.start` stops the camera again).
+    /// Starts a lens session (camera on, frames to the pipeline off the main actor). Refused while
+    /// the app is locked (it starts on unlock), in the background and during the kill switch. A
+    /// `stopLens()` while the camera is coming up wins (`LensScreenModel.start` stops the camera
+    /// again).
     public func startLens() async {
-        guard let lens, phase != .background, !isErasing else { return }
+        guard let lens, phase != .background, !isErasing, !appLock.isLocked else { return }
         await lens.start()
     }
 
@@ -494,6 +527,7 @@ extension AppEnvironment: ObservedStoreDelegate {
     }
 
     func storeDidForget(_ id: PersonID, succeeded: Bool) async {
+        lensLabels.invalidate()
         if succeeded {
             // The refresher may have been created during the forget (model load).
             await refresher?.exclude(id)
@@ -510,6 +544,7 @@ extension AppEnvironment: ObservedStoreDelegate {
 
     func storeWillEraseEverything() async {
         destructiveOperations += 1
+        eraseGeneration += 1
         isErasing = true
         wantsScan = false
         stopLens()
@@ -522,6 +557,9 @@ extension AppEnvironment: ObservedStoreDelegate {
     }
 
     func storeDidEraseEverything(succeeded: Bool) async {
+        // The kill switch is final: nothing it stopped resumes by itself.
+        wantsScan = false
+        lensLabels.invalidate()
         if succeeded {
             excludedPeople = []
             await refresher?.reset()
@@ -541,6 +579,7 @@ extension AppEnvironment: ObservedStoreDelegate {
     }
 
     func storeDidChangeIdentities() async {
+        lensLabels.invalidate()
         peopleRevision += 1
         await refresher?.requestRefresh()
     }
