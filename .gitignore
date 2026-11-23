@@ -1,0 +1,11 @@
+node_modules/
+.expo/
+ios/
+android/
+dist/
+.env*
+!.env.example
+.claude/worktrees/
+.claude/settings.local.json
+*.log
+.DS_Store
