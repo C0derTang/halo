@@ -8,8 +8,8 @@ import Testing
 @Suite struct ChatDatabaseReaderTests {
     let now = Date(timeIntervalSince1970: 1_800_000_000)
 
-    func fixture() throws -> SyntheticChatDB {
-        let db = try SyntheticChatDB()
+    func fixture(wal: Bool = false) throws -> SyntheticChatDB {
+        let db = try SyntheticChatDB(wal: wal)
         let alice = try db.addHandle("+14155550132")
         let bob = try db.addHandle("bob@example.com")
         let carol = try db.addHandle("+14155550199")
@@ -129,5 +129,41 @@ import Testing
                 arguments: ["digest", "--db", "/nonexistent/chat.db", "--out", "/tmp/x"],
                 errorOutput: { messages.append($0) }) == 1)
         #expect(messages.count == 4)
+    }
+
+    @Test func uncheckpointedWalIsSnapshotted() throws {
+        let db = try fixture(wal: true)  // db stays open: data lives only in the -wal
+        let wal = db.url.path + "-wal"
+        let size = try FileManager.default.attributesOfItem(atPath: wal)[.size] as? Int ?? 0
+        #expect(size > 0)
+        let records = try ChatDatabaseReader(url: db.url).messageRecords()
+        #expect(records.count == 3)
+    }
+
+    @Test func staleSnapshotsAreRemoved() throws {
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("sweep-\(UUID())")
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let stale = tmp.appendingPathComponent("halo-bridge-old")
+        let fresh = tmp.appendingPathComponent("halo-bridge-new")
+        let other = tmp.appendingPathComponent("unrelated")
+        for d in [stale, fresh, other] {
+            try FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        }
+        // Directories younger than the threshold are kept.
+        #expect(ChatDatabaseReader.removeStaleSnapshots(in: tmp, olderThan: 300) == 0)
+        let removed = ChatDatabaseReader.removeStaleSnapshots(
+            in: tmp, olderThan: 300, now: Date().addingTimeInterval(400))
+        #expect(removed == 3 - 1)  // stale + fresh match the prefix; "unrelated" does not
+        #expect(!FileManager.default.fileExists(atPath: stale.path))
+        #expect(FileManager.default.fileExists(atPath: other.path))
+    }
+
+    @Test func cliOutputIsOwnerOnly() throws {
+        let db = try fixture()
+        let out = db.dir.appendingPathComponent("perm.json")
+        #expect(BridgeCLI.run(arguments: ["digest", "--db", db.url.path, "--out", out.path]) == 0)
+        let perms = try FileManager.default.attributesOfItem(atPath: out.path)[.posixPermissions] as? Int
+        #expect(perms == 0o600)
     }
 }

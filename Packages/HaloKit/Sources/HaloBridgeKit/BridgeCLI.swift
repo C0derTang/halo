@@ -78,7 +78,13 @@ public enum BridgeCLI {
             let digest = DigestBuilder(normalizer: HandleNormalizer(region: options.region))
                 .build(records: records, now: options.now)
             let data = try encoder().encode(digest)
-            try data.write(to: URL(fileURLWithPath: options.out), options: .atomic)
+            // Owner-only: the digest describes who the user talks to.
+            let attrs: [FileAttributeKey: Any] = [.posixPermissions: 0o600]
+            guard FileManager.default.createFile(atPath: options.out, contents: data, attributes: attrs)
+            else {
+                throw ChatDatabaseError.unreadable("could not write \(options.out)")
+            }
+            try FileManager.default.setAttributes(attrs, ofItemAtPath: options.out)
             return 0
         } catch let e as ChatDatabaseError {
             errorOutput("halo-bridge: \(e)")

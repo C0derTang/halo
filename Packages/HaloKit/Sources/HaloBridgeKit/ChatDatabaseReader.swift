@@ -27,6 +27,10 @@ public enum ChatDatabaseError: Error, CustomStringConvertible, Equatable {
 /// `handle.id`, `message.is_from_me` and `message.date` are ever selected; `text` and
 /// `attributedBody` are never referenced. v1 covers 1:1 chats only: chats whose
 /// `chat_handle_join` has exactly one handle. Group chats are excluded.
+///
+/// v1 counts every `message` row in those chats, including tapbacks/reactions
+/// (`associated_message_type != 0`) and other system rows. No filter is applied so the query
+/// stays valid on older schemas lacking that column.
 public final class ChatDatabaseReader: Sendable {
     public static var defaultURL: URL {
         URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Messages/chat.db")
@@ -35,19 +39,47 @@ public final class ChatDatabaseReader: Sendable {
     private let snapshotDir: URL
     let queue: DatabaseQueue
 
+    static let snapshotPrefix = "halo-bridge-"
+
+    /// Removes snapshot directories left behind by a crashed run (they hold full message
+    /// bodies). Only directories older than `olderThan` seconds are removed so a concurrently
+    /// running instance is not disturbed.
+    @discardableResult
+    static func removeStaleSnapshots(
+        in tempDir: URL = FileManager.default.temporaryDirectory, olderThan age: TimeInterval = 300,
+        now: Date = Date()
+    ) -> Int {
+        let fm = FileManager.default
+        guard
+            let items = try? fm.contentsOfDirectory(
+                at: tempDir, includingPropertiesForKeys: [.contentModificationDateKey])
+        else { return 0 }
+        var removed = 0
+        for item in items where item.lastPathComponent.hasPrefix(snapshotPrefix) {
+            let modified = (try? item.resourceValues(forKeys: [.contentModificationDateKey]))?
+                .contentModificationDate
+            if let modified, now.timeIntervalSince(modified) < age { continue }
+            if (try? fm.removeItem(at: item)) != nil { removed += 1 }
+        }
+        return removed
+    }
+
     public init(url: URL) throws {
         let fm = FileManager.default
+        Self.removeStaleSnapshots()
         guard fm.fileExists(atPath: url.path) else {
             throw ChatDatabaseError.notFound(path: url.path)
         }
-        let dir = fm.temporaryDirectory.appendingPathComponent("halo-bridge-\(UUID().uuidString)")
+        let dir = fm.temporaryDirectory.appendingPathComponent("\(Self.snapshotPrefix)\(UUID().uuidString)")
         do {
             try fm.createDirectory(
                 at: dir, withIntermediateDirectories: true,
                 attributes: [.posixPermissions: 0o700])
             let target = dir.appendingPathComponent("chat.db")
             try fm.copyItem(at: url, to: target)
-            for suffix in ["-wal", "-shm"] {
+            // Copy db + wal only. The -shm index is rebuilt by SQLite; copying a live shm could
+            // disagree with the copied wal.
+            for suffix in ["-wal"] {
                 let side = URL(fileURLWithPath: url.path + suffix)
                 if fm.fileExists(atPath: side.path) {
                     try fm.copyItem(at: side, to: URL(fileURLWithPath: target.path + suffix))

@@ -12,12 +12,20 @@ final class SyntheticChatDB {
     private let queue: DatabaseQueue
     private var nextMessage: Int64 = 1
 
-    init() throws {
+    init(wal: Bool = false) throws {
         dir = FileManager.default.temporaryDirectory.appendingPathComponent(
             "halo-test-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         url = dir.appendingPathComponent("chat.db")
-        queue = try DatabaseQueue(path: url.path)
+        var config = Configuration()
+        if wal {
+            // Keep writes in the -wal file (never checkpointed) while this queue stays open.
+            config.prepareDatabase { db in
+                try db.execute(sql: "PRAGMA wal_autocheckpoint = 0")
+            }
+        }
+        queue = try DatabaseQueue(path: url.path, configuration: config)
+        if wal { try queue.writeWithoutTransaction { try $0.execute(sql: "PRAGMA journal_mode = WAL") } }
         try queue.write { db in
             try db.execute(
                 sql: """
