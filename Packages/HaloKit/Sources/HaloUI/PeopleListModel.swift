@@ -18,7 +18,7 @@ public final class PeopleListModel {
     }
 
     public private(set) var allRows: [PeopleRow] = []
-    /// Unconfirmed people plus pending cluster suggestions awaiting triage.
+    /// Pending cluster suggestions awaiting triage (imported contacts are unconfirmed but not counted).
     public private(set) var needsReviewCount = 0
     public private(set) var errorMessage: String?
     public var searchText = ""
@@ -26,8 +26,18 @@ public final class PeopleListModel {
 
     @ObservationIgnored private let store: any PeopleStoring & EnrollmentStoring
 
-    public init(store: any PeopleStoring & EnrollmentStoring) {
+    @ObservationIgnored private let normalize: @Sendable (String) -> String
+
+    /// - Parameter normalize: handle normalizer; pass the same one the label ranker uses
+    ///   (`HandleNormalizer.normalize`). Default only trims and lowercases.
+    public init(
+        store: any PeopleStoring & EnrollmentStoring,
+        normalize: @escaping @Sendable (String) -> String = {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        }
+    ) {
         self.store = store
+        self.normalize = normalize
     }
 
     /// Confirmed people only (unconfirmed are never recognizable), filtered by search and sorted.
@@ -68,23 +78,22 @@ public final class PeopleListModel {
                 let identities = try await store.identities(for: person.id)
                 rows.append(
                     PeopleRow(
-                        person: person, lastInteraction: Self.lastInteraction(identities, digest)))
+                        person: person, lastInteraction: lastInteraction(identities, digest)))
             }
             allRows = rows
-            needsReviewCount =
-                try await store.clusters().count + people.filter { !$0.confirmed }.count
+            needsReviewCount = try await store.clusters().count
             errorMessage = nil
         } catch {
             errorMessage = "Could not load people."
         }
     }
 
-    static func lastInteraction(_ identities: [Identity], _ digest: InteractionDigest?) -> Date? {
+    func lastInteraction(_ identities: [Identity], _ digest: InteractionDigest?) -> Date? {
         guard let digest else { return nil }
         let handles = Set(
             identities.filter { $0.kind == .phone || $0.kind == .email || $0.kind == .imessageHandle }
-                .map { $0.value.lowercased() })
-        return digest.entries.filter { handles.contains($0.handle.lowercased()) }
+                .map { normalize($0.value) })
+        return digest.entries.filter { handles.contains(normalize($0.handle)) }
             .compactMap(\.lastMessageAt).max()
     }
 }

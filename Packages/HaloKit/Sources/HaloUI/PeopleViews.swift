@@ -134,12 +134,18 @@ public struct PersonDetailView: View {
             relationship = model.person?.relationship ?? ""
         }
         .confirmationDialog(
-            "Forget \(model.person?.displayName ?? "this person")? This permanently deletes their faces and data.",
-            isPresented: $confirmingForget, titleVisibility: .visible
-        ) {
-            Button("Forget", role: .destructive) {
-                Task { if await model.confirmForget() { dismiss() } }
+            "Forget this person?",
+            isPresented: $confirmingForget, titleVisibility: .visible,
+            presenting: model.person
+        ) { person in
+            // `person` is captured at presentation; the dialog's dismissal cannot race the action.
+            Button("Forget permanently", role: .destructive) {
+                Task { if await model.confirmForget(person) { dismiss() } }
             }
+            Button("Cancel", role: .cancel) {}
+        } message: { _ in
+            // No name here: presented UI is not under the privacy cover.
+            Text("Deletes all face data and records for them. This cannot be undone.")
         }
     }
 }

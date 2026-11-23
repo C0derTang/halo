@@ -89,7 +89,7 @@ private func entry(_ handle: String, _ at: Date?) -> InteractionDigest.Entry {
         let model = PeopleListModel(store: store)
         await model.load()
         #expect(model.rows.map(\.person.displayName) == ["Ann"])
-        #expect(model.needsReviewCount == 2)
+        #expect(model.needsReviewCount == 1)
     }
 
     @Test func ordersByLastInteractionThenNameAndNilLast() async {
@@ -216,6 +216,21 @@ private func entry(_ handle: String, _ at: Date?) -> InteractionDigest.Entry {
         #expect(call.3 == t0)
         let expected = ranker.label(for: p, identities: store.idents, digest: store.digest, now: t0)
         #expect(model.labelPreview == expected)
+    }
+
+    @Test func previewReceivesStoreWideIdentities() async {
+        let p = Person(displayName: "Ann", confirmed: true)
+        let q = Person(displayName: "Quin", confirmed: true)
+        let store = PeopleFakeStore(people: [p, q])
+        store.idents = [
+            Identity(personID: p.id, kind: .phone, value: "+1"),
+            Identity(personID: q.id, kind: .phone, value: "+1"),
+        ]
+        let ranker = RecordingRanker()
+        let model = make(store, p, ranker: ranker)
+        await model.load()
+        #expect(Set(ranker.calls.last!.1) == Set(store.idents))
+        #expect(model.identities == [store.idents[0]])
     }
 
     @Test func facesCappedAtTwelveAndFilteredToPerson() async {

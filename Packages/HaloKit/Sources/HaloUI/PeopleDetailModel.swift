@@ -4,6 +4,8 @@ import HaloCore
 import Observation
 
 /// One face thumbnail on the detail screen. In-memory only (invariant 2).
+///
+/// `@unchecked Sendable`: `CGImage` is immutable once created, so sharing it is safe.
 public struct PersonFace: Identifiable, @unchecked Sendable {
     public let id: UUID
     public let image: CGImage?
@@ -65,7 +67,13 @@ public final class PersonDetailModel {
             let log = try await store.recognitionLog(for: personID)
             self.person = person
             self.identities = identities
-            labelPreview = ranker.label(for: person, identities: identities, digest: digest, now: now())
+            // The ranker's ambiguity guard needs the STORE-WIDE identity set, as the lens passes.
+            var allIdentities: [Identity] = []
+            for other in try await store.allPeople() {
+                allIdentities += try await store.identities(for: other.id)
+            }
+            labelPreview = ranker.label(
+                for: person, identities: allIdentities, digest: digest, now: now())
             faceCount = gallery.count
             var thumbs: [PersonFace] = []
             for embedding in gallery.prefix(Self.maxThumbnails) {
@@ -106,7 +114,14 @@ public final class PersonDetailModel {
     /// Runs the injected forget closure at most once; later calls are no-ops.
     @discardableResult
     public func confirmForget() async -> Bool {
-        guard !isForgetting, !didForget, let person else { return false }
+        guard let person else { return false }
+        return await confirmForget(person)
+    }
+
+    /// Forgets `person` as captured by the confirmation dialog at presentation time.
+    @discardableResult
+    public func confirmForget(_ person: Person) async -> Bool {
+        guard !isForgetting, !didForget else { return false }
         isForgetting = true
         defer { isForgetting = false }
         let ok = await forgetAction(person)
@@ -119,7 +134,7 @@ public final class PersonDetailModel {
             recognitions = []
             identities = []
         } else {
-            errorMessage = "Could not forget \(person.displayName)."
+            errorMessage = "Could not forget this person."
         }
         return ok
     }
