@@ -8,10 +8,13 @@ import HaloCore
 /// a handle among THIS person's phone/email/imessage identities. Identities belonging to another
 /// person are ignored, and a handle claimed by identities of two different people is dropped.
 /// Chip text is built only from digest metadata (dates, flags); never from message content.
+/// Memory-hook chips come only from hooks whose `personID` is THIS person (plus `person.notes`);
+/// message excerpts are never read, so message text can reach a chip only via a hook.
 public struct ContextLabelRanker: LabelRanking {
     public static let upcomingWindowDays = 14
     public static let memoryHookMaxLength = 40
     public static let staleAfterDays = 365
+    public static let summaryDecayDays = 30.0
 
     private let calendar: Calendar
     private let locale: Locale
@@ -37,6 +40,13 @@ public struct ContextLabelRanker: LabelRanking {
     public func label(for person: Person, identities: [Identity], digest: InteractionDigest?, now: Date)
         -> LabelData
     {
+        label(for: person, identities: identities, digest: digest, hooks: [], now: now)
+    }
+
+    public func label(
+        for person: Person, identities: [Identity], digest: InteractionDigest?, hooks: [MemoryHook],
+        now: Date
+    ) -> LabelData {
         var chips: [LabelChip] = []
         if let chip = birthdayChip(person.birthday, now: now) { chips.append(chip) }
         if let digest {
@@ -44,10 +54,13 @@ public struct ContextLabelRanker: LabelRanking {
             if let chip = openLoopChip(entries, now: now) { chips.append(chip) }
             if let chip = lastInteractionChip(entries, now: now) { chips.append(chip) }
         }
-        if let chip = memoryHookChip(person.notes) { chips.append(chip) }
+        chips.append(
+            contentsOf: memoryHookChips(notes: person.notes, hooks: hooks, person: person, now: now))
 
         chips.sort {
-            $0.priority != $1.priority ? $0.priority > $1.priority : $0.kind.rawValue < $1.kind.rawValue
+            if $0.priority != $1.priority { return $0.priority > $1.priority }
+            if $0.kind != $1.kind { return $0.kind.rawValue < $1.kind.rawValue }
+            return $0.text < $1.text
         }
         return LabelData(
             personID: person.id, title: person.displayName, subtitle: person.relationship, chips: chips)
@@ -138,7 +151,47 @@ public struct ContextLabelRanker: LabelRanking {
         return LabelChip(kind: .lastInteraction, text: text, priority: stale ? 0.2 : 0.45)
     }
 
-    private func memoryHookChip(_ notes: String?) -> LabelChip? {
+    /// Chips from the person's own unexpired hooks plus the first sentence of `notes`. Duplicates
+    /// (same text after whitespace-collapsing/ellipsizing, case-insensitive) keep the
+    /// highest-priority copy, so a note mirrored by a `userNote` hook shows once.
+    private func memoryHookChips(
+        notes: String?, hooks: [MemoryHook], person: Person, now: Date
+    ) -> [LabelChip] {
+        var candidates: [(chip: LabelChip, created: Date)] = []
+        for hook in hooks where hook.personID == person.id {
+            if let expires = hook.expiresAt, expires <= now { continue }
+            guard let text = ellipsized(hook.text) else { continue }
+            let chip = LabelChip(
+                kind: .memoryHook, text: text, priority: hookPriority(hook, now: now))
+            candidates.append((chip, hook.createdAt))
+        }
+        if let sentence = firstSentence(notes), let text = ellipsized(sentence) {
+            candidates.append((LabelChip(kind: .memoryHook, text: text, priority: 0.4), .distantPast))
+        }
+        candidates.sort {
+            if $0.chip.priority != $1.chip.priority { return $0.chip.priority > $1.chip.priority }
+            if $0.created != $1.created { return $0.created > $1.created }
+            return $0.chip.text < $1.chip.text
+        }
+        var seen: Set<String> = []
+        return candidates.compactMap { candidate in
+            seen.insert(candidate.chip.text.lowercased()).inserted ? candidate.chip : nil
+        }
+    }
+
+    /// User notes and moments 0.6. On-device summaries start at 0.45 and decay linearly with age
+    /// to half that over `summaryDecayDays`.
+    private func hookPriority(_ hook: MemoryHook, now: Date) -> Double {
+        switch hook.source {
+        case .userNote, .moment: return 0.6
+        case .onDeviceSummary:
+            let age = max(0, now.timeIntervalSince(hook.createdAt)) / 86_400
+            let fraction = min(age / Self.summaryDecayDays, 1)
+            return 0.45 * (1 - 0.5 * fraction)
+        }
+    }
+
+    private func firstSentence(_ notes: String?) -> String? {
         guard let notes else { return nil }
         let chars = Array(notes.trimmingCharacters(in: .whitespacesAndNewlines))
         var end = chars.count
@@ -149,13 +202,18 @@ public struct ContextLabelRanker: LabelRanking {
                 break
             }
         }
-        var sentence = String(chars[..<end]).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !sentence.isEmpty else { return nil }
-        if sentence.count > Self.memoryHookMaxLength {
-            let cut = String(sentence.prefix(Self.memoryHookMaxLength - 1))
-            sentence = cut.trimmingCharacters(in: .whitespaces) + "…"
+        return String(chars[..<end])
+    }
+
+    /// Collapses whitespace, trims, and cuts to `memoryHookMaxLength` characters (with "…").
+    private func ellipsized(_ raw: String) -> String? {
+        var text = raw.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        guard !text.isEmpty else { return nil }
+        if text.count > Self.memoryHookMaxLength {
+            let cut = String(text.prefix(Self.memoryHookMaxLength - 1))
+            text = cut.trimmingCharacters(in: .whitespaces) + "…"
         }
-        return LabelChip(kind: .memoryHook, text: sentence, priority: 0.4)
+        return text
     }
 
     // MARK: Formatting
