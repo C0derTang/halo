@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import HaloBridgeKit
 import HaloCore
 import HaloImport
 import HaloLens
@@ -9,7 +10,6 @@ import HaloVision
 
 /// Everything `AppEnvironment` builds on. `live()` is the real app; tests inject fakes.
 public struct AppDependencies: Sendable {
-    public typealias FrameHandler = @Sendable (VideoFrame) -> Void
     public typealias Embedder = any FaceEmbedder & FrameFaceEmbedding
     public typealias Detector = any FaceDetecting & FrameFaceDetecting
 
@@ -22,6 +22,13 @@ public struct AppDependencies: Sendable {
     public var contacts: any ContactsSource
     public var thumbnails: any FaceThumbnailProvider
     public var authenticator: any Authenticating
+    /// Holds the phone's pairing key (Keychain in the app, in-memory in tests). Used by the pairing
+    /// screen and the `.halodigest` importer, so both always see the same key (invariant 5).
+    public var keyStore: any KeyStore
+    /// System permission status / prompts (onboarding, resuming the scan on launch).
+    public var permissions: any PermissionRequesting
+    /// The non-sensitive "onboarding finished" flag.
+    public var onboarding: any OnboardingCompletionStoring
     /// ISO region for phone-number normalization. nil means unknown ("ZZ"), never a guess.
     public var region: String?
     public var policy: MatchPolicy
@@ -30,8 +37,8 @@ public struct AppDependencies: Sendable {
     public var lockTimeout: TimeInterval
     /// Coalescing window for gallery rebuilds after identity changes.
     public var galleryDebounce: Duration
-    /// Creates the camera; frames must go to the handler. nil when there is no camera (macOS host).
-    public var makeCamera: @MainActor @Sendable (@escaping FrameHandler) -> (any AppCamera)?
+    /// Creates the app's one camera (called once, at init). nil when there is no camera (macOS host).
+    public var makeCamera: @MainActor @Sendable () -> (any CameraControlling)?
     /// Runs lifecycle work that must finish after backgrounding (store flush). On iOS this holds a
     /// `UIApplication` background task for the duration.
     public var backgroundWork: @MainActor @Sendable (String, @MainActor () async -> Void) async -> Void
@@ -44,14 +51,16 @@ public struct AppDependencies: Sendable {
         contacts: any ContactsSource,
         thumbnails: any FaceThumbnailProvider,
         authenticator: any Authenticating,
+        keyStore: any KeyStore,
+        permissions: any PermissionRequesting,
+        onboarding: any OnboardingCompletionStoring,
         region: String?,
         policy: MatchPolicy = .conservative,
         lensConfig: LensConfig = LensConfig(),
         scanConfig: PhotoScanConfig = PhotoScanConfig(),
         lockTimeout: TimeInterval = 30,  // AppLock.defaultTimeout (main-actor isolated)
         galleryDebounce: Duration = .milliseconds(250),
-        makeCamera: @escaping @MainActor @Sendable (@escaping FrameHandler) -> (any AppCamera)? = { _ in nil
-        },
+        makeCamera: @escaping @MainActor @Sendable () -> (any CameraControlling)? = { nil },
         backgroundWork: @escaping @MainActor @Sendable (String, @MainActor () async -> Void) async -> Void = {
             _, work in await work()
         }
@@ -63,6 +72,9 @@ public struct AppDependencies: Sendable {
         self.contacts = contacts
         self.thumbnails = thumbnails
         self.authenticator = authenticator
+        self.keyStore = keyStore
+        self.permissions = permissions
+        self.onboarding = onboarding
         self.region = region
         self.policy = policy
         self.lensConfig = lensConfig
@@ -76,7 +88,8 @@ public struct AppDependencies: Sendable {
 
 extension AppDependencies {
     /// The real services: `PeopleStore` at its default (Data Protection `.complete`) path, the
-    /// bundled CoreML embedder, Vision detection, PhotoKit, Contacts, Face ID, the back camera.
+    /// bundled CoreML embedder, Vision detection, PhotoKit, Contacts, Face ID, the Keychain pairing
+    /// key, the system permission prompts, the back camera.
     @MainActor
     public static func live() -> AppDependencies {
         AppDependencies(
@@ -92,6 +105,9 @@ extension AppDependencies {
             contacts: liveContacts(),
             thumbnails: liveThumbnails(),
             authenticator: LocalAuthenticator(),
+            keyStore: KeychainKeyStore.phone,
+            permissions: SystemPermissionRequester(),
+            onboarding: UserDefaultsOnboardingStore(),
             region: Locale.current.region?.identifier,
             makeCamera: liveCamera,
             backgroundWork: LifecycleBackgroundWork.run)
@@ -122,9 +138,9 @@ extension AppDependencies {
     }
 
     @MainActor
-    private static func liveCamera(_ onFrame: @escaping FrameHandler) -> (any AppCamera)? {
+    private static func liveCamera() -> (any CameraControlling)? {
         #if os(iOS)
-            CameraSource(onFrame: onFrame)
+            LensCameraSource()
         #else
             nil
         #endif

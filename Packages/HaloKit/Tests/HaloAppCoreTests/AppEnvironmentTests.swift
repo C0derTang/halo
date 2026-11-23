@@ -20,7 +20,7 @@ import Testing
         try await h.store.seedConfirmed("Synthetic Alice", vector: aliceVector)
         await h.environment.start()
         #expect(h.environment.galleryPersonCount == 1)
-        try await h.environment.startLens()
+        await h.environment.startLens()
         #expect(h.environment.isLensRunning)
         try await h.startBlockedScan()
         let oldEnrollment = h.environment.enrollment
@@ -165,7 +165,7 @@ import Testing
     @Test func backgroundPausesScanStopsCameraAndFlushes() async throws {
         let h = try EnvHarness()
         await h.environment.start()
-        try await h.environment.startLens()
+        await h.environment.startLens()
         try await h.startBlockedScan()
 
         await h.environment.scenePhaseChanged(to: .background).value
@@ -189,7 +189,7 @@ import Testing
         let h = try EnvHarness()
         await h.environment.start()
         await h.environment.scenePhaseChanged(to: .background).value
-        try await h.environment.startLens()
+        await h.environment.startLens()
         #expect(!h.environment.isLensRunning)
         #expect(h.log.count("camera.start") == 0)
     }
@@ -237,15 +237,17 @@ import Testing
         let cameraGate = EnvGate()
         let h = try EnvHarness(cameraStartGate: cameraGate)
         await h.environment.start()
-        let first = Task { try await h.environment.startLens() }
-        let second = Task { try await h.environment.startLens() }
-        try await waitUntil { h.log.count("camera.start") == 2 }
+        let first = Task { await h.environment.startLens() }
+        let second = Task { await h.environment.startLens() }
+        try await waitUntil { h.log.count("camera.start") == 1 && h.environment.isLensRunning }
 
         cameraGate.open()
-        try await first.value
-        try await second.value
+        await first.value
+        await second.value
 
         #expect(h.environment.isLensRunning)
+        // The second start joins the session in progress: the one camera is started once.
+        #expect(h.log.count("camera.start") == 1)
         #expect(h.log.count("camera.stop") == 0)
         let camera = try #require(h.environment.camera as? EnvFakeCamera)
         #expect(camera.isRunning)
@@ -255,12 +257,12 @@ import Testing
         let cameraGate = EnvGate()
         let h = try EnvHarness(cameraStartGate: cameraGate)
         await h.environment.start()
-        let start = Task { try await h.environment.startLens() }
+        let start = Task { await h.environment.startLens() }
         try await waitUntil { h.log.count("camera.start") == 1 }
 
         h.environment.stopLens()
         cameraGate.open()
-        try await start.value
+        await start.value
 
         #expect(!h.environment.isLensRunning)
         // Stopped by stopLens, and again by startLens once the camera came up late.
@@ -299,7 +301,7 @@ import Testing
         // Everything else still works.
         await h.environment.privacy.load()
         #expect(h.environment.privacy.items.count == 1)
-        try await h.environment.startLens()
+        await h.environment.startLens()
         await h.environment.scenePhaseChanged(to: .background).value
         #expect(h.log.count("store.flush") == 1)
     }
