@@ -5,36 +5,8 @@ import SwiftUI
     import UIKit
 #endif
 
-/// Opaque cover shown whenever `AppLock.isCovered` (locked, or not the active scene).
-public struct LifecyclePrivacyCoverView: View {
-    let lock: AppLock
-
-    public init(lock: AppLock) {
-        self.lock = lock
-    }
-
-    public var body: some View {
-        ZStack {
-            Rectangle().fill(.black)
-            VStack(spacing: 16) {
-                Image(systemName: "lock.fill").font(.system(size: 44))
-                    .accessibilityHidden(true)
-                Text("Halo is locked").font(.headline)
-                if lock.isLocked {
-                    Button("Unlock") { Task { await lock.unlock() } }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(lock.isAuthenticating)
-                }
-            }
-            .foregroundStyle(.white)
-        }
-        .ignoresSafeArea()
-        .accessibilityAddTraits(.isModal)
-    }
-}
-
 extension View {
-    /// Covers the whole app while `lock.isCovered`, at the window level.
+    /// Covers the whole app with HaloUI's `PrivacyCover` while `lock.isCovered`, at the window level.
     ///
     /// On iOS the cover is a separate `UIWindow` above `.alert`, so sheets, confirmation dialogs and
     /// alerts presented by the app are covered too (an overlay on the root view would sit *below*
@@ -63,7 +35,7 @@ struct LifecyclePrivacyCoverModifier: ViewModifier {
             .allowsHitTesting(!lock.isCovered)
             .accessibilityHidden(lock.isCovered)
             .overlay {
-                if lock.isCovered { LifecyclePrivacyCoverView(lock: lock) }
+                if lock.isCovered { PrivacyCover(lock: lock) }
             }
             #if os(iOS)
                 .background {
@@ -97,7 +69,7 @@ struct LifecyclePrivacyCoverModifier: ViewModifier {
 
             let window = UIWindow(windowScene: scene)
             window.windowLevel = .alert + 1
-            let host = UIHostingController(rootView: LifecyclePrivacyCoverView(lock: lock))
+            let host = UIHostingController(rootView: PrivacyCover(lock: lock))
             host.view.backgroundColor = .black
             host.view.accessibilityViewIsModal = true
             window.rootViewController = host

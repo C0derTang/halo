@@ -1,7 +1,73 @@
+import CoreGraphics
+import CoreImage
+import Foundation
+import HaloCore
+import ImageIO
+
+/// Crops an enrollment / People thumbnail to the face (`FaceEmbedding.faceBox`) with padding.
+/// Pure geometry on in-memory images (invariant 2: nothing is written anywhere).
+public enum FaceThumbnailCrop {
+    /// Margin around the face on each side, as a fraction of the face box's longer side, so the
+    /// crop shows the head and a little context.
+    public static let padding: CGFloat = 0.5
+
+    /// The box if it is usable: finite, non-empty, and overlapping the unit square.
+    static func validated(_ box: CGRect) -> CGRect? {
+        guard box.origin.x.isFinite, box.origin.y.isFinite, box.width.isFinite, box.height.isFinite,
+            box.width > 0, box.height > 0,
+            box.intersects(CGRect(x: 0, y: 0, width: 1, height: 1))
+        else { return nil }
+        return box
+    }
+
+    /// Long edge to request the whole photo at, so the padded face crop comes out about `target`
+    /// pixels. Capped at `cap`, never below `target`.
+    static func sourcePixelSize(faceBox: CGRect, target: CGFloat, cap: CGFloat) -> CGFloat {
+        let fraction = max(faceBox.width, faceBox.height) * (1 + 2 * padding)
+        guard fraction > 0 else { return target }
+        return max(target, min(cap, (target / min(fraction, 1)).rounded(.up)))
+    }
+
+    /// Pixel rect (top-left origin, as `CGImage.cropping(to:)` expects) of a square around the face:
+    /// centred on it, `padding` added on every side, shifted to stay inside the image and shrunk only
+    /// when the image is smaller than the square. nil when the box does not overlap the image.
+    static func cropRect(faceBox: CGRect, width: Int, height: Int) -> CGRect? {
+        guard let box = validated(faceBox), width > 0, height > 0 else { return nil }
+        let w = CGFloat(width)
+        let h = CGFloat(height)
+        let face = CGRect(x: box.minX * w, y: box.minY * h, width: box.width * w, height: box.height * h)
+        let side = min(max(face.width, face.height) * (1 + 2 * padding), w, h)
+        let x = min(max(face.midX - side / 2, 0), w - side)
+        let y = min(max(face.midY - side / 2, 0), h - side)
+        let rect = CGRect(x: x, y: y, width: side, height: side).integral
+            .intersection(CGRect(x: 0, y: 0, width: w, height: h))
+        guard !rect.isNull, rect.width >= 1, rect.height >= 1 else { return nil }
+        return rect
+    }
+
+    /// The face crop of an UPRIGHT image, or the whole image when there is no usable box.
+    static func crop(_ image: CGImage, to faceBox: CGRect?) -> CGImage {
+        guard let faceBox, let rect = cropRect(faceBox: faceBox, width: image.width, height: image.height),
+            let cropped = image.cropping(to: rect)
+        else { return image }
+        return cropped
+    }
+
+    /// `image` turned upright (the face box is in upright coordinates). `.up` is returned as is.
+    static func upright(_ image: CGImage, orientation: CGImagePropertyOrientation) -> CGImage? {
+        guard orientation != .up else { return image }
+        let oriented = CIImage(cgImage: image).oriented(orientation)
+        return SharedCIContext.shared.context.createCGImage(oriented, from: oriented.extent)
+    }
+}
+
+/// `CIContext` is thread-safe; one is shared because creating them is expensive.
+private struct SharedCIContext: @unchecked Sendable {
+    static let shared = SharedCIContext()
+    let context = CIContext()
+}
+
 #if canImport(Photos)
-    import CoreGraphics
-    import Foundation
-    import HaloCore
     import HaloUI
     import Photos
     import Synchronization
@@ -18,15 +84,23 @@
     /// rather than a download. Images are returned in memory and never written anywhere. Only
     /// `.photoLibrary` embeddings have a PHAsset `sourceRef`; anything else has no thumbnail.
     ///
-    /// The embedding does not store its face box, so the thumbnail is the whole photo
-    /// (aspect-filled to `targetPixelSize`).
+    /// When the embedding has a `faceBox`, the thumbnail is that face with padding (see
+    /// `FaceThumbnailCrop`), cropped from a photo requested just large enough for the crop to be
+    /// about `targetPixelSize`. Without one (embeddings stored before the field existed) it is the
+    /// whole photo, aspect-filled to `targetPixelSize`. Either way the result is upright.
     public struct PhotoKitThumbnailProvider: FaceThumbnailProvider {
         public var targetPixelSize: CGFloat
+        /// Long edge cap for the photo requested to crop a face from.
+        public var maxSourcePixelSize: CGFloat
         /// A PhotoKit request that never calls back resolves to nil after this long.
         public var timeout: Duration
 
-        public init(targetPixelSize: CGFloat = 320, timeout: Duration = .seconds(10)) {
+        public init(
+            targetPixelSize: CGFloat = 320, maxSourcePixelSize: CGFloat = 2048,
+            timeout: Duration = .seconds(10)
+        ) {
             self.targetPixelSize = targetPixelSize
+            self.maxSourcePixelSize = maxSourcePixelSize
             self.timeout = timeout
         }
 
@@ -40,17 +114,27 @@
             options.deliveryMode = .highQualityFormat
             options.resizeMode = .fast
             options.isSynchronous = false
-            let size = CGSize(width: targetPixelSize, height: targetPixelSize)
+            let faceBox = embedding.faceBox.flatMap(FaceThumbnailCrop.validated)
+            let side =
+                faceBox.map {
+                    FaceThumbnailCrop.sourcePixelSize(
+                        faceBox: $0, target: targetPixelSize, cap: maxSourcePixelSize)
+                } ?? targetPixelSize
+            let size = CGSize(width: side, height: side)
+            // With a face box the whole photo is needed (aspect-fit), so the normalized box applies.
+            let contentMode: PHImageContentMode = faceBox == nil ? .aspectFill : .aspectFit
             let request = ThumbnailRequest()
             let timeout = self.timeout
-            return await withTaskCancellationHandler {
+            let photo = await withTaskCancellationHandler {
                 await withCheckedContinuation { (continuation: CheckedContinuation<SendableImage, Never>) in
                     guard request.install(continuation) else { return }  // already cancelled
                     let id = PHImageManager.default().requestImage(
-                        for: asset, targetSize: size, contentMode: .aspectFill, options: options
+                        for: asset, targetSize: size, contentMode: contentMode, options: options
                     ) { image, info in
                         if (info?[PHImageResultIsDegradedKey] as? Bool) == true { return }
-                        request.finish(SendableImage(image.flatMap(Self.cgImage)))
+                        request.finish(
+                            SendableImage(
+                                image.flatMap(Self.cgImage), orientation: image.map(Self.orientation) ?? .up))
                     }
                     request.setRequestID(id)
                     request.setTimer(
@@ -59,25 +143,49 @@
                             guard !Task.isCancelled else { return }
                             request.cancel()  // PhotoKit never called back
                         })
-                }.image
+                }
             } onCancel: {
                 request.cancel()
             }
+            // Off the main actor (`@concurrent`): orient and crop after PhotoKit's callback.
+            guard let raw = photo.image,
+                let upright = FaceThumbnailCrop.upright(raw, orientation: photo.orientation)
+            else { return nil }
+            return FaceThumbnailCrop.crop(upright, to: faceBox)
         }
 
         #if canImport(UIKit)
             static func cgImage(_ image: UIImage) -> CGImage? { image.cgImage }
+            /// `UIImage.cgImage` keeps the stored pixel orientation; this says how to make it upright.
+            static func orientation(_ image: UIImage) -> CGImagePropertyOrientation {
+                switch image.imageOrientation {
+                case .up: .up
+                case .upMirrored: .upMirrored
+                case .down: .down
+                case .downMirrored: .downMirrored
+                case .left: .left
+                case .leftMirrored: .leftMirrored
+                case .right: .right
+                case .rightMirrored: .rightMirrored
+                @unknown default: .up
+                }
+            }
         #elseif canImport(AppKit)
             static func cgImage(_ image: NSImage) -> CGImage? {
                 image.cgImage(forProposedRect: nil, context: nil, hints: nil)
             }
+            static func orientation(_ image: NSImage) -> CGImagePropertyOrientation { .up }
         #endif
     }
 
     /// `CGImage` is immutable once created; this carries one out of the PhotoKit callback.
     private struct SendableImage: @unchecked Sendable {
         let image: CGImage?
-        init(_ image: CGImage?) { self.image = image }
+        let orientation: CGImagePropertyOrientation
+        init(_ image: CGImage?, orientation: CGImagePropertyOrientation = .up) {
+            self.image = image
+            self.orientation = orientation
+        }
     }
 
     /// One PhotoKit thumbnail request: resumes its continuation exactly once (result, timeout or

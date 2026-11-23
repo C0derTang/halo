@@ -75,16 +75,22 @@ public final class AppLock {
     }
 }
 
-/// Opaque privacy cover shown while the app is covered.
-struct PrivacyCover: View {
+/// Opaque privacy cover shown while the app is covered. The app shows it at the window level
+/// (above sheets and alerts); `privacyLock(_:)` shows it over a single view.
+public struct PrivacyCover: View {
     let lock: AppLock
 
-    var body: some View {
+    public init(lock: AppLock) {
+        self.lock = lock
+    }
+
+    public var body: some View {
         ZStack {
             Rectangle().fill(.black)
             Rectangle().fill(.ultraThinMaterial)
             VStack(spacing: 16) {
                 Image(systemName: "lock.fill").font(.system(size: 44))
+                    .accessibilityHidden(true)
                 Text("Halo is locked").font(.headline)
                 if lock.isLocked {
                     Button("Unlock") { Task { await lock.unlock() } }
@@ -95,6 +101,7 @@ struct PrivacyCover: View {
             .foregroundStyle(.white)
         }
         .ignoresSafeArea()
+        .accessibilityAddTraits(.isModal)
     }
 }
 

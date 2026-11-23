@@ -11,8 +11,12 @@ import SwiftUI
 /// `LensOverlayGeometry` relies on to put each label on the right face.
 struct LensScreen: View {
     @Bindable var model: LensScreenModel
-    /// The `CameraSource` session the model's camera drives (`LensCameraSource.session`).
+    /// The session of the app's one camera (`AppEnvironment.captureSession`).
     let session: AVCaptureSession
+    /// Starts the session through the environment, so backgrounding and the kill switch know the
+    /// lens is on screen (`AppEnvironment.lensAppeared`).
+    let onAppear: () async -> Void
+    let onDisappear: () -> Void
 
     /// Single source of truth for how the preview fits the frame; the overlay maps with the same.
     static let gravity: LensOverlayGeometry.VideoGravity = .resizeAspectFill
@@ -26,8 +30,8 @@ struct LensScreen: View {
             .background(Color.black)
             .overlay(alignment: .top) { banners }
             .overlay(alignment: .bottomTrailing) { metricsControls }
-            .task { await model.start() }
-            .onDisappear { model.stop() }
+            .task { await onAppear() }
+            .onDisappear { onDisappear() }
             .task(id: model.showsMetrics) {
                 guard model.showsMetrics else { return }
                 while !Task.isCancelled {

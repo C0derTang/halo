@@ -48,13 +48,18 @@ public struct RecognitionLogView: View {
     }
 }
 
-public struct SettingsView: View {
+/// Settings root: privacy (people, recognition history, forget, erase everything). `sections` are
+/// extra app sections (pairing, imports) shown above the privacy ones, inside the same
+/// navigation stack.
+public struct SettingsView<Sections: View>: View {
     let model: PrivacySettingsViewModel
+    let sections: Sections
     @State private var showEraseSheet = false
     @State private var eraseText = ""
 
-    public init(model: PrivacySettingsViewModel) {
+    public init(model: PrivacySettingsViewModel, @ViewBuilder sections: () -> Sections) {
         self.model = model
+        self.sections = sections()
     }
 
     public var body: some View {
@@ -67,6 +72,7 @@ public struct SettingsView: View {
                             systemImage: "hourglass")
                     }
                 }
+                sections
                 Section("People") {
                     if model.items.isEmpty { Text("No people stored") }
                     ForEach(model.items) { item in
@@ -132,6 +138,12 @@ public struct SettingsView: View {
                 }
             }
         }
+    }
+}
+
+extension SettingsView where Sections == EmptyView {
+    public init(model: PrivacySettingsViewModel) {
+        self.init(model: model) { EmptyView() }
     }
 }
 

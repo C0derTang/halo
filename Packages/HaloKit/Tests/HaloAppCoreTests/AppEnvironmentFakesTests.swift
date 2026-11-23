@@ -1,6 +1,7 @@
 import CoreGraphics
 import CoreVideo
 import Foundation
+import HaloBridgeKit
 import HaloCore
 import HaloImport
 import HaloStore
@@ -38,6 +39,8 @@ final class EnvRecordingStore: AppStoring {
     let failForget = Mutex(false)
     /// When set, `forget` parks on it before touching the store.
     let forgetGate = Mutex<EnvGate?>(nil)
+    /// When set, `saveDigest` parks on it before touching the store (an import "in flight").
+    let saveDigestGate = Mutex<EnvGate?>(nil)
 
     init(log: EnvEventLog) throws {
         base = try PeopleStore.inMemory()
@@ -46,7 +49,10 @@ final class EnvRecordingStore: AppStoring {
 
     func person(_ id: PersonID) async throws -> Person? { try await base.person(id) }
     func allPeople() async throws -> [Person] { try await base.allPeople() }
-    func upsert(_ person: Person) async throws { try await base.upsert(person) }
+    func upsert(_ person: Person) async throws {
+        log.record("store.upsert")
+        try await base.upsert(person)
+    }
     func identities(for id: PersonID) async throws -> [Identity] { try await base.identities(for: id) }
     func addIdentity(_ identity: Identity) async throws { try await base.addIdentity(identity) }
     func person(matching kind: Identity.Kind, value: String) async throws -> Person? {
@@ -66,7 +72,12 @@ final class EnvRecordingStore: AppStoring {
         try await base.forget(id)
     }
     func latestDigest() async throws -> InteractionDigest? { try await base.latestDigest() }
-    func saveDigest(_ digest: InteractionDigest) async throws { try await base.saveDigest(digest) }
+    func saveDigest(_ digest: InteractionDigest) async throws {
+        log.record("store.saveDigest")
+        if let gate = saveDigestGate.withLock({ $0 }) { await gate.wait() }
+        try await base.saveDigest(digest)
+        log.record("store.saveDigest.done")
+    }
 
     func unassignedEmbeddings(space: EmbeddingSpace) async throws -> [FaceEmbedding] {
         try await base.unassignedEmbeddings(space: space)
@@ -195,25 +206,81 @@ final class EnvGate: Sendable {
     }
 }
 
-final class EnvFakeCamera: AppCamera {
+/// The app's one camera, faked: records start / stop and delivers frames the test pushes to the
+/// installed handler (as the capture queue would).
+final class EnvFakeCamera: CameraControlling {
     let log: EnvEventLog
     let startGate: EnvGate?
     init(log: EnvEventLog, startGate: EnvGate? = nil) {
         self.log = log
         self.startGate = startGate
     }
-    private let running = Mutex(false)
+    private struct State {
+        var running = false
+        var handler: (@Sendable (VideoFrame) -> Void)?
+    }
+    private let state = Mutex(State())
     /// Like the real session: running after a completed start, until the next stop.
-    var isRunning: Bool { running.withLock { $0 } }
+    var isRunning: Bool { state.withLock { $0.running } }
+    var hasFrameHandler: Bool { state.withLock { $0.handler != nil } }
 
     func start() async throws {
         log.record("camera.start")
         await startGate?.wait()
-        running.withLock { $0 = true }
+        state.withLock { $0.running = true }
     }
     func stop() {
         log.record("camera.stop")
-        running.withLock { $0 = false }
+        state.withLock { $0.running = false }
+    }
+    func setFrameHandler(_ handler: (@Sendable (VideoFrame) -> Void)?) {
+        state.withLock { $0.handler = handler }
+    }
+    /// Delivers a frame to the installed handler, if any and if running.
+    func deliver(_ frame: VideoFrame) {
+        let handler = state.withLock { $0.running ? $0.handler : nil }
+        handler?(frame)
+    }
+}
+
+/// Contacts source whose fetch parks until the import is cancelled, then (after a short,
+/// non-cancellable delay) returns one synthetic contact, so tests can check that the import is
+/// awaited and that its writes are refused after cancellation.
+struct EnvBlockingContacts: ContactsSource {
+    let log: EnvEventLog
+
+    func fetchContacts() async throws -> [ContactRecord] {
+        log.record("contacts.fetch")
+        do {
+            try await Task.sleep(for: .seconds(3600))
+        } catch {
+            log.record("contacts.cancelled")
+            await Task.detached { try? await Task.sleep(for: .milliseconds(20)) }.value
+            log.record("contacts.returned")
+        }
+        return [
+            ContactRecord(identifier: "synthetic-contact-blocked", givenName: "Synthetic", familyName: "Late")
+        ]
+    }
+}
+
+/// Permission fake with a fixed status per permission (status never prompts; request returns it).
+final class EnvPermissions: PermissionRequesting {
+    private let statuses: [OnboardingPermission: PermissionStatus]
+    private let requests = Mutex<[OnboardingPermission]>([])
+
+    init(_ statuses: [OnboardingPermission: PermissionStatus] = [:]) {
+        self.statuses = statuses
+    }
+
+    var requested: [OnboardingPermission] { requests.withLock { $0 } }
+
+    func status(for permission: OnboardingPermission) async -> PermissionStatus {
+        statuses[permission] ?? .notDetermined
+    }
+    func request(_ permission: OnboardingPermission) async -> PermissionStatus {
+        requests.withLock { $0.append(permission) }
+        return statuses[permission] ?? .denied
     }
 }
 
@@ -232,15 +299,24 @@ struct EnvHarness {
     let store: EnvRecordingStore
     let log: EnvEventLog
     let embedder: EnvFakeEmbedder
+    let keyStore: MemoryKeyStore
+    let permissions: EnvPermissions
+    let onboarding: InMemoryOnboardingStore
 
     init(
         modelMissing: Bool = false, region: String? = "US", contacts: [ContactRecord] = [],
+        blockingContacts: Bool = false,
         openStore: (@Sendable () throws -> any AppStoring)? = nil, embedderGate: EnvGate? = nil,
-        cameraStartGate: EnvGate? = nil
+        cameraStartGate: EnvGate? = nil, permissions: [OnboardingPermission: PermissionStatus] = [:],
+        onboardingCompleted: Bool = false
     ) throws {
         let log = EnvEventLog()
         let store = try EnvRecordingStore(log: log)
         let embedder = EnvFakeEmbedder()
+        let keyStore = MemoryKeyStore()
+        let permissionFake = EnvPermissions(permissions)
+        let onboarding = InMemoryOnboardingStore()
+        if onboardingCompleted { onboarding.markCompleted() }
         let dependencies = AppDependencies(
             openStore: openStore ?? { store },
             loadEmbedder: {
@@ -250,16 +326,57 @@ struct EnvHarness {
             },
             detector: EnvFakeDetector(),
             photoLibrary: EnvBlockingLibrary(log: log, store: store),
-            contacts: InMemoryContactsSource(records: contacts),
+            contacts: blockingContacts
+                ? EnvBlockingContacts(log: log) as any ContactsSource
+                : InMemoryContactsSource(records: contacts),
             thumbnails: EnvNoThumbnails(),
             authenticator: EnvFakeAuthenticator(),
+            keyStore: keyStore,
+            permissions: permissionFake,
+            onboarding: onboarding,
             region: region,
             galleryDebounce: .milliseconds(1),
-            makeCamera: { _ in EnvFakeCamera(log: log, startGate: cameraStartGate) })
+            makeCamera: { EnvFakeCamera(log: log, startGate: cameraStartGate) })
         environment = AppEnvironment(dependencies: dependencies)
         self.store = store
         self.log = log
         self.embedder = embedder
+        self.keyStore = keyStore
+        self.permissions = permissionFake
+        self.onboarding = onboarding
+    }
+
+    /// The app starts locked; the lens only runs once unlocked (the fake authenticator succeeds).
+    func unlock() async {
+        #expect(await environment.appLock.unlock())
+    }
+
+    var camera: EnvFakeCamera {
+        // `makeCamera` above always builds one.
+        environment.camera as! EnvFakeCamera
+    }
+
+    /// A sealed `.halodigest` for this phone's pairing key, written to a temporary file (inside
+    /// the importer's deletable roots, so the import deletes it).
+    func digestFile(_ digest: InteractionDigest, region: String = "US") throws -> URL {
+        let key = try PairingKey.loadOrCreate(in: keyStore)
+        let payload = try PairingPayload(encoded: key.pairingPayload)
+        let data = try DigestEnvelope.seal(digest, normalizerRegion: region, to: payload).serialized
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "env-\(UUID().uuidString).halodigest")
+        try data.write(to: url)
+        return url
+    }
+
+    /// Delivers synthetic frames through the camera until `condition` holds.
+    func deliverFrames(until condition: @MainActor () -> Bool) async throws {
+        let frames = EnvFrames()
+        var t = 0.0
+        try await waitUntil {
+            camera.deliver(frames.frame(at: t))
+            t += 0.3
+            return condition()
+        }
     }
 
     /// Starts a scan and waits until it is parked inside the photo library listing.

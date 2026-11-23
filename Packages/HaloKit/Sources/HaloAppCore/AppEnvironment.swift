@@ -15,20 +15,28 @@ import SwiftUI
 /// lifecycle and privacy rules.
 ///
 /// Load-bearing rules (invariants 2, 3, 5, 7):
+/// - **One camera.** `camera` is the only capture source. The Live Lens drives it through `lens`
+///   (`LensScreenModel`); backgrounding and the kill switch stop that same instance.
 /// - **Writers stop before erasure.** `forget` and the kill switch (through `store`, the only store
-///   screens get) first cancel and await any running photo scan; the kill switch also stops the
-///   camera and clears the lens gallery before `eraseEverything` runs. Afterwards every in-memory
-///   copy (gallery, lens votes, triage view model) is reset.
+///   screens get) first stop every writer: the photo scan (cancelled and awaited), the contacts
+///   and digest imports (awaited for a forget; cancelled and awaited for the kill switch) and the
+///   lens's recognition-log writes. The kill switch also stops the camera and clears the lens
+///   gallery before `eraseEverything` runs. New imports wait until the operation has finished.
+///   Afterwards every in-memory copy (gallery, lens votes and labels, triage view model) is reset.
+/// - **Names leave the screen at once.** A forgotten person is dropped from the lens gallery
+///   (`setMatcher`) before the store deletes them, and `LensScreenModel.forgetLabel` runs as soon as
+///   the forget succeeded.
 /// - **The gallery follows identity changes.** Every confirm / forget / deleteEmbeddings / erase /
 ///   digest import / upsert rebuilds the `GalleryMatcher` and calls `LensPipeline.setMatcher`
 ///   (debounced, off the main actor). A forgotten person is dropped from the lens *before* the store
 ///   deletes them.
 /// - **Nothing per frame on the main actor.** Camera frames go straight from the capture queue to
-///   the `LensPipeline` actor via `LensFrameRouter`.
+///   the `LensPipeline` actor (`LensScreenModel`'s frame handler calls `submit`).
 /// - **Missing model is not a crash.** `recognition == .unavailable`: no lens pipeline, no photo
 ///   scan; the rest of the app works.
-/// - **One handle normalizer** (device region, unknown -> "ZZ", never a guessed "US") shared by the
-///   contacts importer, the handle resolver and the label ranker.
+/// - **One handle normalizer and one ranker** (device region, unknown -> "ZZ", never a guessed "US")
+///   shared by the contacts importer, the digest importer, the handle resolver, the People screens
+///   and the label ranker the lens and the person detail screen both use.
 @MainActor @Observable
 public final class AppEnvironment {
     public enum RecognitionStatus: Hashable, Sendable {
@@ -51,17 +59,26 @@ public final class AppEnvironment {
     public let handleNormalizer: HandleNormalizer
     public let labelRanker: ContextLabelRanker
     public let handleResolver: HandleResolver
-    public let camera: (any AppCamera)?
+    /// The app's one camera (nil on the macOS host).
+    public let camera: (any CameraControlling)?
     public let policy: MatchPolicy
+    /// `.halodigest` import status for the UI. Imports run through `importDigest(url:)`.
+    public let digestImport: DigestImportModel
     /// nil until the model loaded, and forever when recognition is unavailable.
     public private(set) var lensPipeline: LensPipeline?
+    /// The Live Lens screen model, driving `camera`. nil until recognition is known (and without a
+    /// camera). When the model is missing it runs the preview with `recognitionAvailable == false`.
+    public private(set) var lens: LensScreenModel?
+    /// The embedding space of the loaded model; nil until loaded and when recognition is unavailable.
+    public private(set) var embeddingSpace: EmbeddingSpace?
 
     // MARK: Observable state
 
     public private(set) var recognition: RecognitionStatus = .loading
     public var recognitionAvailable: Bool { recognition == .available }
     public private(set) var isStoreAvailable = false
-    public private(set) var isLensRunning = false
+    /// A lens session is running (the camera is on or coming up).
+    public var isLensRunning: Bool { lens?.isRunning ?? false }
     public private(set) var scanStatus: PhotoScanStatus = .idle
     public private(set) var scanProgress: ScanProgress?
     public private(set) var phase: ScenePhase = .active
@@ -77,15 +94,35 @@ public final class AppEnvironment {
 
     // MARK: Private
 
-    @ObservationIgnored private let dependencies: AppDependencies
+    @ObservationIgnored let dependencies: AppDependencies
     @ObservationIgnored private let lazyStore: LazyStore
-    @ObservationIgnored private let frameRouter = LensFrameRouter()
     @ObservationIgnored private var refresher: GalleryRefresher?
     @ObservationIgnored private var embedder: AppDependencies.Embedder?
     @ObservationIgnored private var startTask: Task<Void, Never>?
     @ObservationIgnored private var lifecycleChain: Task<Void, Never>?
-    /// Forgets / erases in progress. The scan does not (re)start while any is running.
-    @ObservationIgnored private var destructiveOperations = 0
+    /// Forgets / erases in progress. The scan does not (re)start and imports do not start while any
+    /// is running.
+    @ObservationIgnored private(set) var destructiveOperations = 0
+    /// The kill switch is running: the lens does not (re)start.
+    @ObservationIgnored private var isErasing = false
+    /// Imports parked until the running forget / erase has finished.
+    @ObservationIgnored private var destructiveWaiters: [CheckedContinuation<Void, Never>] = []
+    /// Running contacts import (onboarding or Settings). Owned here so forget / erase can stop it.
+    @ObservationIgnored var contactsTask: Task<ContactsImportResult, any Error>?
+    /// The `.halodigest` import currently writing (at most one). Owned here so forget / erase can
+    /// stop it.
+    @ObservationIgnored var digestTask: Task<Void, Never>?
+    /// Tail of the queue of requested digest imports (they run one at a time, in order).
+    @ObservationIgnored var digestQueue: Task<Bool, Never>?
+    /// Bumped by every kill switch. An import requested before an erase that has not started
+    /// writing when the erase begins is dropped, never run afterwards.
+    @ObservationIgnored private(set) var eraseGeneration = 0
+    /// Lens label source with a cached store-wide identity set, invalidated on identity changes.
+    @ObservationIgnored let lensLabels: LensLabelStore
+    /// Progress subscribers (onboarding). Finished when the scan is over (not when it pauses).
+    @ObservationIgnored private var scanObservers: [UUID: AsyncStream<ScanProgress>.Continuation] = [:]
+    /// The Lens tab is on screen: the lens restarts on `.active` and after the kill switch.
+    @ObservationIgnored private var lensVisible = false
     /// The user asked for a scan that has not finished yet (it may be paused).
     @ObservationIgnored private var wantsScan = false
     @ObservationIgnored private var scanTask: Task<Void, Never>?
@@ -93,9 +130,6 @@ public final class AppEnvironment {
     /// People being or already forgotten. Owned here (not only by the refresher) so a refresher
     /// created while a forget is in flight (e.g. during model load) starts with them excluded.
     @ObservationIgnored private var excludedPeople: Set<PersonID> = []
-    /// Bumped only by `stopLens`. A start whose camera came up after a later stop sees a different
-    /// token and stops the camera again; overlapping starts share a token and both succeed.
-    @ObservationIgnored private var lensToken = 0
 
     public init(dependencies: AppDependencies) {
         self.dependencies = dependencies
@@ -115,12 +149,39 @@ public final class AppEnvironment {
             calendar: Calendar.current, locale: Locale.current, normalizer: normalizer)
         handleResolver = HandleResolver(
             store: store, normalization: HandleNormalization(normalizer: normalizer))
+        digestImport = DigestImportModel(
+            importer: DigestImporter(
+                keyStore: dependencies.keyStore, store: CancellableWriteStore(base: store),
+                normalization: HandleNormalization(normalizer: normalizer)))
 
-        let router = frameRouter
-        camera = dependencies.makeCamera { frame in router.route(frame) }
+        camera = dependencies.makeCamera()
+        lensLabels = LensLabelStore(base: store)
 
         isStoreAvailable = lazyStore.openIfNeeded()
         store.setDelegate(self)
+        observeAppLock()
+    }
+
+    /// Stops the lens whenever the app locks and restarts it (if on screen) once unlocked: nothing
+    /// is captured, recognized or logged behind the privacy cover.
+    private func observeAppLock() {
+        withObservationTracking {
+            _ = appLock.isLocked
+        } onChange: { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                self.appLockChanged()
+                self.observeAppLock()
+            }
+        }
+    }
+
+    private func appLockChanged() {
+        if appLock.isLocked {
+            stopLens()
+        } else if lensVisible {
+            Task { await startLens() }
+        }
     }
 
     /// The real app.
@@ -131,9 +192,12 @@ public final class AppEnvironment {
     /// The same normalizer, wrapped for HaloImport.
     public var handleNormalization: HandleNormalization { HandleNormalization(normalizer: handleNormalizer) }
 
-    /// Contacts importer sharing the app's normalizer.
-    public func makeContactsImporter() -> ContactsImporter {
-        ContactsImporter(store: store, source: dependencies.contacts, normalization: handleNormalization)
+    /// Contacts importer sharing the app's normalizer. Its writes stop at the first one after its
+    /// task is cancelled (the kill switch). Run it through `importContacts()`.
+    func makeContactsImporter() -> ContactsImporter {
+        ContactsImporter(
+            store: CancellableWriteStore(base: store), source: dependencies.contacts,
+            normalization: handleNormalization)
     }
 
     // MARK: - Startup
@@ -156,10 +220,13 @@ public final class AppEnvironment {
         do {
             embedder = try await dependencies.loadEmbedder()
         } catch {
-            // Never crash on a missing or broken model: the lens and scan are simply unavailable.
-            recognition = .unavailable
+            // Never crash on a missing or broken model: the lens preview runs without recognition,
+            // and the scan is unavailable.
             wantsScan = false
             scanStatus = .unavailable
+            finishScanObservers()
+            lens = makeLens(source: UnavailableLensTrackSource(), recognitionAvailable: false)
+            recognition = .unavailable
             return
         }
         let pipeline = LensPipeline(
@@ -173,11 +240,22 @@ public final class AppEnvironment {
         }
         self.embedder = embedder
         self.refresher = refresher
+        embeddingSpace = embedder.space
         lensPipeline = pipeline
         await refresher.refreshNow()
-        frameRouter.attach(pipeline)
+        lens = makeLens(source: pipeline, recognitionAvailable: true)
         recognition = .available
         reconcileScan()
+        await resumePhotoScanIfConsented()
+    }
+
+    /// The lens screen model over `camera`. Labels come from the shared ranker with store-wide
+    /// identities (`LensLabelStore`), the same as the person detail screen.
+    private func makeLens(source: any LensTrackSource, recognitionAvailable: Bool) -> LensScreenModel? {
+        guard let camera else { return nil }
+        return LensScreenModel(
+            source: source, camera: camera, store: lensLabels, ranker: labelRanker,
+            recognitionAvailable: recognitionAvailable)
     }
 
     private func galleryApplied(_ matcher: GalleryMatcher) {
@@ -232,6 +310,9 @@ public final class AppEnvironment {
                 let lock = appLock
                 Task { await lock.unlock() }
             }
+            if lensVisible {
+                Task { await self.startLens() }
+            }
             return enqueueLifecycle { [self] in
                 // Retry a rebuild that failed earlier (e.g. a read while the device was locked).
                 await refresher?.requestRefresh()
@@ -254,25 +335,29 @@ public final class AppEnvironment {
 
     // MARK: - Lens
 
-    /// Starts the camera; frames flow to the lens pipeline off the main actor. Refused in the
-    /// background.
-    public func startLens() async throws {
-        guard let camera, phase != .background else { return }
-        let token = lensToken  // read only: overlapping starts must not invalidate each other
-        try await camera.start()
-        // A stop while the camera was coming up wins: the camera may have started after that stop
-        // was issued, so stop it again.
-        guard token == lensToken, phase != .background else {
-            camera.stop()
-            return
-        }
-        isLensRunning = true
+    /// The Lens tab appeared: start the lens, and restart it after backgrounding / the kill switch.
+    public func lensAppeared() async {
+        lensVisible = true
+        await startLens()
+    }
+
+    /// The Lens tab disappeared: stop the camera.
+    public func lensDisappeared() {
+        lensVisible = false
+        stopLens()
+    }
+
+    /// Starts a lens session (camera on, frames to the pipeline off the main actor). Refused while
+    /// the app is locked (it starts on unlock), in the background and during the kill switch. A
+    /// `stopLens()` while the camera is coming up wins (`LensScreenModel.start` stops the camera
+    /// again).
+    public func startLens() async {
+        guard let lens, phase != .background, !isErasing, !appLock.isLocked else { return }
+        await lens.start()
     }
 
     public func stopLens() {
-        lensToken += 1
-        camera?.stop()
-        isLensRunning = false
+        lens?.stop()
     }
 
     // MARK: - Photo scan
@@ -304,6 +389,7 @@ public final class AppEnvironment {
             for await progress in job.progress {
                 guard let self, self.scanRunID == runID else { return }
                 self.scanProgress = progress
+                self.publishScanProgress(progress)
             }
         }
         scanTask = Task { [weak self] in
@@ -325,14 +411,46 @@ public final class AppEnvironment {
             scanProgress = progress
             scanStatus = .finished
             wantsScan = false
+            publishScanProgress(progress)
+            finishScanObservers()
             let enrollment = self.enrollment
             Task { await enrollment.load() }
         case .failure(let error) where error is CancellationError:
             scanStatus = wantsScan ? .paused : .idle
+            if !wantsScan { finishScanObservers() }
         case .failure:
             scanStatus = .failed
             wantsScan = false
+            finishScanObservers()
         }
+    }
+
+    /// Progress of the current (or next) scan run, until the scan is over: finished, failed,
+    /// unavailable or erased. A pause (backgrounding, a forget) does not end it. Finishes at once
+    /// when no scan is wanted.
+    public func photoScanUpdates() -> AsyncStream<ScanProgress> {
+        let (stream, continuation) = AsyncStream.makeStream(of: ScanProgress.self)
+        if let scanProgress, scanTask != nil { continuation.yield(scanProgress) }
+        guard wantsScan || scanTask != nil else {
+            continuation.finish()
+            return stream
+        }
+        let id = UUID()
+        scanObservers[id] = continuation
+        continuation.onTermination = { [weak self] _ in
+            Task { @MainActor in self?.scanObservers[id] = nil }
+        }
+        return stream
+    }
+
+    private func publishScanProgress(_ progress: ScanProgress) {
+        for observer in scanObservers.values { observer.yield(progress) }
+    }
+
+    private func finishScanObservers() {
+        let observers = scanObservers.values
+        scanObservers = [:]
+        for observer in observers { observer.finish() }
     }
 
     /// Cancels the running scan and waits until it has stopped writing. It stays wanted, so it
@@ -341,6 +459,36 @@ public final class AppEnvironment {
         guard let task = scanTask else { return }
         task.cancel()
         await task.value
+    }
+
+    // MARK: - Writers vs. destructive operations
+
+    /// Parks until no forget / erase is running. Imports call this before they start writing.
+    func whenNoDestructiveOperation() async {
+        while destructiveOperations > 0 {
+            await withCheckedContinuation { destructiveWaiters.append($0) }
+        }
+    }
+
+    private func destructiveOperationEnded() {
+        destructiveOperations -= 1
+        guard destructiveOperations == 0 else { return }
+        let waiters = destructiveWaiters
+        destructiveWaiters = []
+        for waiter in waiters { waiter.resume() }
+    }
+
+    /// Waits for the running imports. With `cancel`, cancels them first: their next store write
+    /// throws (`CancellableWriteStore`), and a write already in flight lands before this returns.
+    private func stopImports(cancel: Bool) async {
+        let contacts = contactsTask
+        let digest = digestTask
+        if cancel {
+            contacts?.cancel()
+            digest?.cancel()
+        }
+        _ = try? await contacts?.value
+        await digest?.value
     }
 
     // MARK: - Labels
@@ -369,33 +517,49 @@ extension AppEnvironment: ObservedStoreDelegate {
     func storeWillForget(_ id: PersonID) async {
         destructiveOperations += 1
         excludedPeople.insert(id)
-        await pauseScan()
+        // Drop them from the lens first: `setMatcher` clears every on-screen name at once.
         await refresher?.exclude(id)
+        await pauseScan()
+        // Let running imports finish their writes (new ones wait for this forget).
+        await stopImports(cancel: false)
+        // Recognition-log writes the lens already issued land before the delete.
+        await lens?.settle()
     }
 
     func storeDidForget(_ id: PersonID, succeeded: Bool) async {
+        lensLabels.invalidate()
         if succeeded {
             // The refresher may have been created during the forget (model load).
             await refresher?.exclude(id)
+            lens?.forgetLabel(id)
         } else {
             excludedPeople.remove(id)
             await refresher?.include(id)
         }
         await refresher?.requestRefresh()
         peopleRevision += 1
-        destructiveOperations -= 1
+        destructiveOperationEnded()
         reconcileScan()
     }
 
     func storeWillEraseEverything() async {
         destructiveOperations += 1
+        eraseGeneration += 1
+        isErasing = true
         wantsScan = false
-        await pauseScan()
         stopLens()
         await refresher?.reset()
+        // Every writer is stopped and has finished writing before the erase.
+        await pauseScan()
+        await stopImports(cancel: true)
+        await lens?.settle()
+        finishScanObservers()
     }
 
     func storeDidEraseEverything(succeeded: Bool) async {
+        // The kill switch is final: nothing it stopped resumes by itself.
+        wantsScan = false
+        lensLabels.invalidate()
         if succeeded {
             excludedPeople = []
             await refresher?.reset()
@@ -407,10 +571,15 @@ extension AppEnvironment: ObservedStoreDelegate {
             await refresher?.requestRefresh()
         }
         peopleRevision += 1
-        destructiveOperations -= 1
+        isErasing = false
+        destructiveOperationEnded()
+        if lensVisible, phase != .background {
+            Task { await self.startLens() }
+        }
     }
 
     func storeDidChangeIdentities() async {
+        lensLabels.invalidate()
         peopleRevision += 1
         await refresher?.requestRefresh()
     }

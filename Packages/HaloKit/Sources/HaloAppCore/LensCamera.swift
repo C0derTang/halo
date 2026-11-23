@@ -2,7 +2,11 @@ import HaloCore
 import HaloLens
 import Synchronization
 
-/// Camera the Live Lens drives: start, stop, and a frame sink.
+/// The app's one camera: start, stop, and a frame sink.
+///
+/// There is exactly one instance, owned by `AppEnvironment` (`environment.camera`) and driven by
+/// the Live Lens through `LensScreenModel`. Backgrounding and the kill switch stop that same
+/// instance, so no second capture session can keep running (invariants 2 + 7).
 ///
 /// Frame budget (invariant 7): the handler is called on the camera's own capture queue, never the
 /// main actor, and must return quickly (the lens hands the frame straight to
