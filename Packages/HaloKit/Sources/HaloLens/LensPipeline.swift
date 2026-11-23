@@ -16,10 +16,15 @@ import Synchronization
 /// - Labeled tracks are re-embedded at least every `LensConfig.reverifyInterval` (when the face is
 ///   usable), and lose the label after `LensConfig.staleLabelTimeout` without evidence.
 /// - Vote state is keyed by `TrackID`; lost tracks are removed from the voter, so an identity
-///   never transfers to a new track. A track that reappears after a miss may have been
-///   re-associated to a different face, so all of its vote state (a held label AND any partial
-///   acquire streak) is discarded and it must earn `minVotes` again. The same happens if the
-///   tracker clears a track's identity.
+///   never transfers to a new track. When a track reappears after a miss:
+///   - unlabeled: its partial acquire streak is discarded (votes from before the miss may belong
+///     to a different face), so it must earn `minVotes` from scratch;
+///   - labeled, and the tracker KEPT its identity (tight IoU re-match within
+///     `TrackerConfig.identityResetAfterMissed`): the label is kept but marked overdue, so it is
+///     re-verified in the very next embed slot ahead of everything else; the voter's drop rules
+///     apply to that result as usual;
+///   - labeled, and the tracker CLEARED its identity (loose fallback re-match or long gap): all of
+///     its vote state is discarded.
 /// - Faces are only compared against the injected on-device `FaceMatching` gallery; nothing about
 ///   any face leaves this pipeline except the `LensTrack` output.
 /// - Work runs on this actor (never the main actor). At most one frame is in flight: a frame that
@@ -162,16 +167,22 @@ public actor LensPipeline {
         voter.retain(only: live)
         schedule.retain(only: live)
         for track in current {
-            // Reappeared after a miss: the re-association may be a different face, so no vote
-            // gathered before the miss (label or partial streak) may count toward this face.
             let reappeared = track.framesSinceSeen == 0 && coastingLastFrame.contains(track.id)
-            let labeled = Self.isKnown(voter.identity(for: track.id))
-            // The tracker cleared the identity (possible face swap), or evidence stopped.
-            let invalidLabel =
-                labeled
-                && (!Self.isKnown(track.identity)
-                    || schedule.isStale(track.id, now: now, timeout: config.staleLabelTimeout))
-            if reappeared || invalidLabel { voter.forget(trackID: track.id) }
+            if Self.isKnown(voter.identity(for: track.id)) {
+                if !Self.isKnown(track.identity)
+                    || schedule.isStale(track.id, now: now, timeout: config.staleLabelTimeout)
+                {
+                    // The tracker cleared the identity (fallback re-match or long gap: possibly a
+                    // different face), or evidence stopped. Discard everything.
+                    voter.forget(trackID: track.id)
+                } else if reappeared {
+                    // Tight re-match after a short blip: keep the label, re-check it first.
+                    schedule.markOverdue(track.id)
+                }
+            } else if reappeared {
+                // Partial streak from before the miss must not count toward this face.
+                voter.forget(trackID: track.id)
+            }
         }
         coastingLastFrame = Set(current.lazy.filter { $0.framesSinceSeen > 0 }.map(\.id))
         let tracked = clock.now

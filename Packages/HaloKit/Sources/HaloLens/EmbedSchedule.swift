@@ -53,6 +53,12 @@ struct EmbedSchedule: Sendable {
         return chosen
     }
 
+    /// Makes the track due immediately, as if it had never been attempted. For a labeled track this
+    /// puts it in the top (overdue re-verify) tier on the next selection.
+    mutating func markOverdue(_ id: TrackID) {
+        lastAttempt[id] = nil
+    }
+
     /// A successful embedding produced evidence (a match result) for the track.
     mutating func recordEvidence(for id: TrackID, at now: TimeInterval) {
         lastEvidence[id] = now

@@ -254,12 +254,50 @@ import Testing
     #expect(more[1][0].personID == person(1))
 }
 
-@Test func labelRequiresFreshVotesAfterMissEvenOnIoUMatch() async {
+@Test func labeledTrackSurvivesOneFrameBlipButIsReverifiedNext() async {
+    let config = LensConfig(embedInterval: 0.25, reverifyInterval: 1, maxEmbedsPerFrame: 1)
+    let h = Harness(config: config)
+    h.embedder.setCode(1, x: 0.1)
+    let acquire = await h.run(0..<20, faces: [face(x: 0.1)])  // embeds at frames 0, 8, 16
+    #expect(acquire.last?[0].personID == person(1))
+    let lastEmbed = h.embedder.calls(x: 0.1).last!.time
+
+    let blip = await h.run(20..<21, faces: [])
+    #expect(blip[0][0].state == .lost)
+    #expect(blip[0][0].personID == person(1))
+
+    // Back on a tight IoU re-match one frame later, alongside a never-embedded newcomer that
+    // would otherwise take the single slot. The label is kept, and re-verified right away.
+    let back = await h.run(21..<22, faces: [face(x: 0.1), face(x: 0.6)])
+    let returned = back[0].first { $0.smoothedBox.minX < 0.3 }!
+    #expect(returned.trackID == acquire.last?[0].trackID)
+    #expect(returned.personID == person(1))
+    let reverify = h.embedder.calls(x: 0.1).last!.time
+    #expect(reverify == h.frames.frame(21).timestamp)
+    #expect(reverify - lastEmbed < config.embedInterval, "re-verify jumped the throttle")
+    #expect(h.embedder.calls(x: 0.6).isEmpty)
+}
+
+@Test func reverifyAfterBlipAppliesDropRules() async {
     let h = Harness(config: everyFrame)
     h.embedder.setCode(1, x: 0.3)
     await h.run(0..<3, faces: [face(x: 0.3)])
     await h.run(3..<4, faces: [])
+    h.embedder.setCode(0, x: 0.3)  // after the blip the face no longer matches
     let back = await h.run(4..<7, faces: [face(x: 0.3)])
+    #expect(back[0][0].personID == person(1))  // one off vote is not enough to drop
+    #expect(back.last?[0].personID == nil)
+}
+
+@Test func longGapRematchDropsLabel() async {
+    // Tight IoU re-match, but after more than `identityResetAfterMissed` (default 5) missed
+    // frames: the tracker clears the identity, so the label must be earned again.
+    let h = Harness(config: everyFrame)
+    h.embedder.setCode(1, x: 0.3)
+    let first = await h.run(0..<3, faces: [face(x: 0.3)])
+    await h.run(3..<10, faces: [])  // 7 missed frames, still under maxMissedFrames
+    let back = await h.run(10..<13, faces: [face(x: 0.3)])
+    #expect(back[0][0].trackID == first[2][0].trackID, "fixture expects the same track")
     #expect(back[0][0].personID == nil)
     #expect(back[1][0].personID == nil)
     #expect(back[2][0].personID == person(1))

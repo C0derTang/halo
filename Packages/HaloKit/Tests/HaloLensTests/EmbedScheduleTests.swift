@@ -86,3 +86,11 @@ private func candidate(_ id: UInt64, labeled: Bool = false, eligible: Bool = tru
     config.staleLabelTimeout = 0.5
     #expect(config.staleLabelTimeout == 8)
 }
+
+@Test func markOverduePutsLabeledTrackFirst() {
+    var s = EmbedSchedule()
+    let config = LensConfig(embedInterval: 0.25, reverifyInterval: 1, maxEmbedsPerFrame: 1)
+    _ = s.select([candidate(1, labeled: true)], now: 0, config: config)
+    s.markOverdue(TrackID(1))
+    #expect(s.select([candidate(2), candidate(1, labeled: true)], now: 0.05, config: config) == [TrackID(1)])
+}
