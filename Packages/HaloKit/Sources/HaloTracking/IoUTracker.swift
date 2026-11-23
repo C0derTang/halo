@@ -15,11 +15,15 @@ public struct TrackerConfig: Sendable {
     public var minCutoff: Double
     public var beta: Double
     public var dCutoff: Double
+    /// A track re-associated (by any pass) after MORE than this many missed frames loses its
+    /// identity: after a long gap the match may be a different face (invariant 4).
+    public var identityResetAfterMissed: Int
 
     public init(
         iouThreshold: Double = 0.3, maxMissedFrames: Int = 10,
         maxCenterDistanceFactor: Double = 1.0, maxSizeRatio: Double = 1.6,
-        minCutoff: Double = 1.0, beta: Double = 20.0, dCutoff: Double = 1.0
+        minCutoff: Double = 1.0, beta: Double = 20.0, dCutoff: Double = 1.0,
+        identityResetAfterMissed: Int = 5
     ) {
         self.iouThreshold = iouThreshold
         self.maxMissedFrames = maxMissedFrames
@@ -28,6 +32,7 @@ public struct TrackerConfig: Sendable {
         self.minCutoff = minCutoff
         self.beta = beta
         self.dCutoff = dCutoff
+        self.identityResetAfterMissed = identityResetAfterMissed
     }
 }
 
@@ -148,6 +153,8 @@ public struct IoUTracker: FaceTracking, Sendable {
         // Invariant: a track re-associated after a miss by the loose fallback may be a different
         // face, so it must not keep a previous identity.
         if fallback && e.track.framesSinceSeen > 0 { e.track.identity = .unknown }
+        // Likewise after a long gap, even when the IoU match looks tight.
+        if e.track.framesSinceSeen > config.identityResetAfterMissed { e.track.identity = .unknown }
         let b = o.boundingBox
         let missed = CGFloat(e.track.framesSinceSeen + 1)
         let dx = (b.midX - e.rawBox.midX) / missed

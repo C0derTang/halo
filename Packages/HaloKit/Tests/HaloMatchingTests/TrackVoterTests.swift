@@ -192,4 +192,26 @@ private func feed(_ voter: inout TrackVoter, _ results: [MatchResult], trackID: 
         let voter = TrackVoter(policy: policy)
         #expect(voter.identity(for: TrackID(99)) == .unknown)
     }
+
+    @Test func alternatingDisagreementDropsThenSwitchesAtPinnedIndexes() {
+        var voter = TrackVoter(policy: policy)
+        let results: [MatchResult] =
+            [known(alice), known(alice), known(alice)]
+            + [known(bob), known(bob), known(alice), known(bob), known(bob), known(bob)]
+        let out = feed(&voter, results)
+        #expect(isKnown(out[2], as: alice))
+        #expect(isKnown(out[5], as: alice))
+        #expect(out[6] == .unknown)  // alice is 3 of last 6: not a strict majority
+        #expect(out[7] == .unknown)
+        #expect(isKnown(out[8], as: bob))
+    }
+
+    @Test func exactHalfMajorityDropsOnLastFrame() {
+        var voter = TrackVoter(policy: policy)
+        let results: [MatchResult] =
+            [known(alice), known(alice), known(alice), .unknown, .ambiguous, known(alice), .unknown]
+        let out = feed(&voter, results)
+        #expect(isKnown(out[5], as: alice))  // 4 of 6 alice
+        #expect(out[6] == .unknown)  // 3 of 6: precision over recall
+    }
 }

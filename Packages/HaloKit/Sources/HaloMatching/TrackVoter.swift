@@ -70,7 +70,7 @@ public struct TrackVoter: Sendable {
 
         if let held = state.heldPerson {
             state.window.append(person)
-            if state.window.count > 2 * required { state.window.removeFirst() }
+            while state.window.count > 2 * required { state.window.removeFirst() }
             state.offStreak = person == held ? 0 : state.offStreak + 1
 
             if person == held, case .known(_, let similarity, let margin) = result {

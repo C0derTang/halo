@@ -129,6 +129,16 @@ private func purity(_ result: ClusteringResult, truth: [UUID: Int]) -> Double {
     }
 }
 
+@Test func onlyLowQualityEmbeddingsYieldEmptyClusters() throws {
+    var g = LCG(state: 10)
+    let c = centers(1)[0]
+    let poor = (0..<4).map { _ in sample(c, noise: 0.2, quality: 0.05, g: &g) }
+    let result = try FaceClusterer().cluster(poor)
+    #expect(result.clusters.isEmpty)
+    #expect(result.unclustered.isEmpty)
+    #expect(Set(result.lowQuality) == Set(poor.map(\.id)))
+}
+
 @Test func lowQualityFiltered() throws {
     var g = LCG(state: 9)
     let c = centers(1)[0]
@@ -278,14 +288,14 @@ private func assignFixture() throws -> ([FaceEmbedding], ClusteringResult, [[Flo
 
 @Test func assignInvalidCentroidThrows() throws {
     var g = LCG(state: 80)
-    var (initial, base, cs) = try assignFixture()
+    let (initial, fixtureBase, cs) = try assignFixture()
+    var base = fixtureBase
     base.clusters[0].centroid = [1, 0]
     let new = sample(cs[0], noise: 0.2, g: &g)
     #expect(throws: ClusteringError.invalidCluster(id: base.clusters[0].id)) {
         try FaceClusterer().assign(
             newEmbeddings: [new], to: base.clusters, existingEmbeddings: initial)
     }
-    initial.removeAll()
 }
 
 @Test func assignDropsLowQualityNewFaces() throws {
