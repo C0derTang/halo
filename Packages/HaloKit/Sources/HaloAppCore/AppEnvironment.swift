@@ -109,6 +109,10 @@ public final class AppEnvironment {
     @ObservationIgnored private var whisperRouteObserver: WhisperRouteObserver?
     /// The `.playback` + `.mixWithOthers` session is active (only while Whisper may run).
     @ObservationIgnored var isWhisperAudioActive = false
+    /// A Moment sheet is open: Whisper pauses (dictation owns the audio session).
+    @ObservationIgnored var isMomentOpen = false
+    /// What Whisper was last fed (labeled people + states) and when; rect-only moves are skipped.
+    @ObservationIgnored var lastWhisperFeed: (signature: Set<WhisperFeedKey>, at: Date)?
 
     /// The matcher most recently handed to the lens (tests).
     @ObservationIgnored private(set) var activeGallery: GalleryMatcher?
@@ -199,7 +203,7 @@ public final class AppEnvironment {
             settings: settings, route: whisperComponents.route, devices: whisperComponents.devices,
             speech: whisperComponents.speech, haptics: whisperComponents.haptics)
         self.whisper = whisper
-        whisperRouteObserver = WhisperRouteObserver { [weak whisper] in whisper?.routeDidChange() }
+        whisperRouteObserver = WhisperRouteObserver { [weak self] in self?.whisperRouteChanged() }
 
         isStoreAvailable = lazyStore.openIfNeeded()
         store.setDelegate(self)
@@ -626,6 +630,8 @@ extension AppEnvironment: ObservedStoreDelegate {
             scanProgress = nil
             scanStatus = recognition == .unavailable ? .unavailable : .idle
             enrollment = EnrollmentViewModel(store: store, thumbnails: dependencies.thumbnails)
+            // "Erase all Halo data" includes the Whisper toggles and trusted Bluetooth devices.
+            eraseWhisperData()
             resetGeneration += 1
         } else {
             await refresher?.requestRefresh()

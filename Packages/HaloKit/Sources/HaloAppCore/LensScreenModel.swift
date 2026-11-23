@@ -43,6 +43,9 @@ public final class LensScreenModel {
     public var showsMetrics = false
     /// Latest pipeline numbers, refreshed by `refreshMetrics()` while the debug overlay is shown.
     public private(set) var metrics: LensMetrics?
+    /// At least one item carries a (confirmed person's) label. Changes far less often than
+    /// `items`, so views that only need this don't re-render on every box move.
+    public private(set) var hasRecognizedPeople = false
     /// Called on the main actor whenever `items` changes (Whisper is fed from here).
     @ObservationIgnored public var onItemsChange: (@MainActor ([LensOverlayItem]) -> Void)?
 
@@ -140,6 +143,7 @@ public final class LensScreenModel {
         camera.stop()
         latestTracks = []
         items = []
+        hasRecognizedPeople = false
         loggedThisSession = []
         onItemsChange?([])
     }
@@ -210,6 +214,8 @@ public final class LensScreenModel {
                 trackID: track.trackID, rect: track.smoothedBox, state: Self.hologramState(track.state),
                 label: Self.knownPerson(track).flatMap { labels[$0] })
         }
+        let recognized = next.contains { $0.label != nil }
+        if recognized != hasRecognizedPeople { hasRecognizedPeople = recognized }
         guard next != items else { return }
         items = next
         onItemsChange?(next)

@@ -47,7 +47,7 @@ struct SettingsTab: View {
                 Toggle("Whisper names", isOn: whisperBinding(\.isEnabled))
                 Toggle("Also say one detail", isOn: whisperBinding(\.speaksChip))
                     .disabled(!environment.whisperSettings.isEnabled)
-                if let device = environment.whisper.pendingDeviceConfirmation {
+                if let device = environment.whisperDevicePrompt {
                     Button("Use \(device.name) for Whisper") { environment.confirmWhisperDevice(true) }
                 }
             } header: {

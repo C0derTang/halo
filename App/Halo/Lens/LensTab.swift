@@ -11,9 +11,9 @@ struct LensTab: View {
         if isEnabled, let model = environment.lens, let session = environment.captureSession {
             LensScreen(
                 model: model, session: session,
-                recognizedPeople: environment.recognizedPeople,
                 momentsAllowed: environment.momentsAllowed,
-                makeMomentsModel: { people in environment.makeMomentsModel(for: people) },
+                makeMomentsModel: { environment.makeMomentsModel() },
+                onMomentOpenChange: { environment.momentSheetChanged(isOpen: $0) },
                 onAppear: { await environment.lensAppeared() },
                 onDisappear: { environment.lensDisappeared() }
             )
@@ -33,7 +33,8 @@ extension View {
     /// Whisper found a Bluetooth output the user has not confirmed: ask once whether it is
     /// personal headphones (car kits look the same). Nothing is spoken until they confirm.
     fileprivate func whisperDevicePrompt(_ environment: AppEnvironment) -> some View {
-        let device = environment.whisper.pendingDeviceConfirmation
+        // Only while Whisper is on (the environment withdraws the question when it stops).
+        let device = environment.whisperDevicePrompt
         return alert(
             "Whisper through \(device?.name ?? "this device")?",
             isPresented: Binding(get: { device != nil }, set: { _ in }),

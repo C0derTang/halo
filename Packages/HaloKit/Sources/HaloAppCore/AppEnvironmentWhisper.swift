@@ -1,4 +1,5 @@
 import Foundation
+import HaloCore
 import HaloUI
 
 #if os(iOS)
@@ -174,22 +175,38 @@ final class NoAudioSession: AudioSessionConfiguring {
 
 // MARK: - Environment wiring
 
+/// What Whisper reacts to in one overlay item: who is labeled, with what, in which state. Box
+/// moves are not part of it.
+struct WhisperFeedKey: Hashable {
+    let label: LabelData
+    let state: HologramState
+}
+
 extension AppEnvironment {
+    /// Re-feed an unchanged overlay at most this often (so an interrupted person's retry backoff
+    /// can elapse while nobody moves).
+    static let whisperRefeedInterval: TimeInterval = 1
+
     /// Whisper may speak right now: the user turned it on, a lens session is running, the app is
-    /// unlocked and not in the background, and no kill switch is running.
+    /// unlocked and not in the background, no kill switch is running and no Moment is open.
     var whisperMayRun: Bool {
         whisperSettings.isEnabled && isLensRunning && !appLock.isLocked && phase != .background
-            && !isErasing
+            && !isErasing && !isMomentOpen
     }
 
-    /// Settings toggles. Turning Whisper off cancels any speech at once and releases the audio
-    /// session; turning it on while the lens runs activates it.
+    /// The Bluetooth device to ask about, only while Whisper is on. Bind the prompt to this.
+    public var whisperDevicePrompt: AudioOutput? {
+        whisperSettings.isEnabled ? whisper.pendingDeviceConfirmation : nil
+    }
+
+    /// Settings toggles. Turning Whisper off cancels any speech at once, withdraws a device question
+    /// and releases the audio session; turning it on while the lens runs activates it.
     public func setWhisperSettings(_ settings: WhisperSettings) {
         whisperSettings = settings
         whisperComponents.settings.save(settings)
         whisper.settings = settings
         syncWhisperAudio()
-        if let lens, whisperMayRun { lensItemsChanged(lens.items) }
+        refeedWhisper()
     }
 
     /// The user confirmed / declined the Bluetooth device Whisper asked about.
@@ -199,10 +216,34 @@ extension AppEnvironment {
         } else {
             whisper.dismissPendingDevice()
         }
-        if let lens, whisperMayRun { lensItemsChanged(lens.items) }
+        refeedWhisper()
     }
 
-    /// The audio session is active exactly while Whisper may run.
+    /// A Moment sheet opened or closed. While open, Whisper is paused (speech cancelled, session
+    /// released: dictation switches the shared session to `.record`). On close the dictation
+    /// session has restored and deactivated the category, so ours is set up again from scratch.
+    public func momentSheetChanged(isOpen: Bool) {
+        guard isOpen != isMomentOpen else { return }
+        isMomentOpen = isOpen
+        if isOpen {
+            whisper.cancelSpeech()
+            syncWhisperAudio()
+        } else {
+            isWhisperAudioActive = false
+            syncWhisperAudio()
+            refeedWhisper()
+        }
+    }
+
+    /// `AVAudioSession.routeChangeNotification`. Forwarded only while Whisper may run, so a route
+    /// change with Whisper off (new AirPods, dictation's `.record`) never asks about a device.
+    func whisperRouteChanged() {
+        guard whisperMayRun else { return }
+        whisper.routeDidChange()
+    }
+
+    /// The audio session is active exactly while Whisper may run. When it may not, any pending
+    /// device question is withdrawn.
     func syncWhisperAudio() {
         if whisperMayRun {
             guard !isWhisperAudioActive else { return }
@@ -213,21 +254,50 @@ extension AppEnvironment {
                 // Without our session Whisper stays silent rather than using another category.
                 isWhisperAudioActive = false
             }
-        } else if isWhisperAudioActive {
-            whisperComponents.audioSession.deactivate()
-            isWhisperAudioActive = false
+        } else {
+            whisper.clearPendingDevice()
+            lastWhisperFeed = nil
+            if isWhisperAudioActive {
+                whisperComponents.audioSession.deactivate()
+                isWhisperAudioActive = false
+            }
         }
     }
 
-    /// Every lens overlay update. Ignored unless Whisper may run with its audio session active.
-    func lensItemsChanged(_ items: [LensOverlayItem]) {
+    /// Every lens overlay update. Fed to Whisper only while it may run with its session active,
+    /// and only when the labeled people or their states changed (or `whisperRefeedInterval`
+    /// passed), not on every box move.
+    func lensItemsChanged(_ items: [LensOverlayItem], now: Date = Date()) {
         guard whisperMayRun, isWhisperAudioActive else { return }
+        let signature = Set(
+            items.compactMap { item in item.label.map { WhisperFeedKey(label: $0, state: item.state) } })
+        if let last = lastWhisperFeed, last.signature == signature,
+            now.timeIntervalSince(last.at) < Self.whisperRefeedInterval
+        {
+            return
+        }
+        lastWhisperFeed = (signature, now)
         whisper.update(items)
+    }
+
+    /// Feeds the current overlay regardless of the last signature (settings, device answer, Moment
+    /// closed).
+    private func refeedWhisper() {
+        lastWhisperFeed = nil
+        if let lens { lensItemsChanged(lens.items) }
     }
 
     /// Lens stopped (tab left, lock, background, kill switch): cancel speech, release the session.
     func stopWhisper() {
         whisper.resetSession()
         syncWhisperAudio()
+    }
+
+    /// Kill switch: the toggles go back to their defaults (off) and every trusted device is
+    /// forgotten.
+    func eraseWhisperData() {
+        whisperComponents.devices.removeAll()
+        setWhisperSettings(WhisperSettings())
+        whisper.clearPendingDevice()
     }
 }

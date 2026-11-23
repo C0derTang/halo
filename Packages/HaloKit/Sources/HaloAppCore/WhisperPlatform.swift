@@ -55,6 +55,10 @@ public final class UserDefaultsTrustedAudioDeviceStore: TrustedAudioDeviceStore 
         uids.insert(portUID)
         defaults.set(Array(uids), forKey: key)
     }
+
+    public func removeAll() {
+        defaults.removeObject(forKey: key)
+    }
 }
 
 /// Speaks one utterance at a time; `stop()` halts immediately and drops the completion.

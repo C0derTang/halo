@@ -21,7 +21,12 @@ extension AppEnvironment {
     /// The "Moment" button is enabled: Moments are allowed and at least one confirmed person is
     /// recognized.
     public var canStartMoment: Bool {
-        momentsAllowed && !recognizedPeople.isEmpty
+        momentsAllowed && (lens?.hasRecognizedPeople ?? false)
+    }
+
+    /// The sheet model for the people labeled on screen right now (read at tap time).
+    public func makeMomentsModel() -> MomentsModel {
+        makeMomentsModel(for: recognizedPeople)
     }
 
     /// The sheet model for the people on screen when the button was tapped.

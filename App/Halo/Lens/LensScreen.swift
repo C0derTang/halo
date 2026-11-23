@@ -13,13 +13,14 @@ struct LensScreen: View {
     @Bindable var model: LensScreenModel
     /// The session of the app's one camera (`AppEnvironment.captureSession`).
     let session: AVCaptureSession
-    /// Confirmed people labeled on screen right now (`AppEnvironment.recognizedPeople`).
-    let recognizedPeople: [LensRecognizedPerson]
     /// Moments may start / stay open (`AppEnvironment.momentsAllowed`): false on lock,
     /// background, kill switch or lens stop, which dismisses an open sheet.
     let momentsAllowed: Bool
-    /// Builds the Moments model for the people on screen (`AppEnvironment.makeMomentsModel`).
-    let makeMomentsModel: @MainActor ([LensRecognizedPerson]) -> MomentsModel
+    /// Builds the Moments model for the people on screen at tap time
+    /// (`AppEnvironment.makeMomentsModel()`).
+    let makeMomentsModel: @MainActor () -> MomentsModel
+    /// The sheet opened / closed (`AppEnvironment.momentSheetChanged`): Whisper pauses meanwhile.
+    let onMomentOpenChange: @MainActor (Bool) -> Void
     /// Starts the session through the environment, so backgrounding and the kill switch know the
     /// lens is on screen (`AppEnvironment.lensAppeared`).
     let onAppear: () async -> Void
@@ -47,6 +48,9 @@ struct LensScreen: View {
             // Lock, background, kill switch, lens stopped: close the sheet (it stops dictation).
             .onChange(of: momentsAllowed) { _, allowed in
                 if !allowed { moment = nil }
+            }
+            .onChange(of: moment == nil) { _, closed in
+                onMomentOpenChange(!closed)
             }
             .task { await onAppear() }
             .onDisappear { onDisappear() }
@@ -79,12 +83,12 @@ struct LensScreen: View {
     /// person is recognized.
     private var momentButton: some View {
         Button {
-            moment = MomentPresentation(model: makeMomentsModel(recognizedPeople))
+            moment = MomentPresentation(model: makeMomentsModel())
         } label: {
             Label("Moment", systemImage: "square.and.pencil")
         }
         .buttonStyle(.borderedProminent)
-        .disabled(!momentsAllowed || recognizedPeople.isEmpty)
+        .disabled(!momentsAllowed || !model.hasRecognizedPeople)
         .padding(.bottom, 24)
         .accessibilityHint(Text("Add a note about the people in view"))
     }
