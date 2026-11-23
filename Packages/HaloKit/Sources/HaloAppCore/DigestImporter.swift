@@ -23,6 +23,8 @@ public enum DigestImportError: Error, Equatable, CustomStringConvertible {
     case keychainUnavailable
     /// The digest was valid but could not be saved.
     case saveFailed
+    /// Authenticated, but older than the digest already stored (replay of an old export).
+    case staleDigest
 
     public var description: String { userMessage }
 
@@ -41,6 +43,7 @@ public enum DigestImportError: Error, Equatable, CustomStringConvertible {
         case .invalidDigest: return "The digest content is invalid."
         case .keychainUnavailable: return "The pairing key could not be read from the Keychain."
         case .saveFailed: return "The digest could not be saved."
+        case .staleDigest: return "This digest is older than the one already imported, so it was ignored."
         }
     }
 }
@@ -66,32 +69,52 @@ public struct DigestImportReport: Equatable, Sendable {
 ///   only through `PeopleStoring` (the encrypted store).
 /// - The input file is deleted after the attempt, on success AND on failure (the app's Inbox copy).
 ///
+/// - The file is deleted only when it lives inside the app's own container (Inbox / tmp / caches); a
+///   user's original file picked from elsewhere is never removed.
+/// - A digest older than the stored one is rejected (`staleDigest`).
+///
 /// Handle normalization: the Mac normalized handles with the region it sealed into the (authenticated)
 /// header. Here each handle is normalized again with `HandleNormalizer(region: opened.normalizerRegion)`,
 /// i.e. the sender's region, never the phone's. That is idempotent for E.164 and emails, and canonicalizes
-/// anything left in a national format using the region it was actually written in. Applying the phone's
-/// region instead could attach a wrong country code. The app side (`ContextLabelRanker`, `HandleResolver`)
-/// normalizes stored identities with the phone's normalizer, so both sides meet at E.164. Entries that
-/// collapse to the same handle are merged.
+/// national-format numbers using the region they were written in. If the sender's region is not in
+/// `HandleNormalizer`'s table, phone-like numbers without a `+` cannot be made E.164 safely, and
+/// downstream `HandleResolver`/`ContextLabelRanker` would re-normalize bare digits with the PHONE's
+/// region and could match a different person. Such entries are therefore DROPPED (a missed match beats a
+/// wrong one). Entries that collapse to the same handle are merged, recomputing `awaitingMyReply`.
 public struct DigestImporter: Sendable {
     private let keyStore: any KeyStore
     private let store: any PeopleStoring
     private let resolver: HandleResolver
+    private let deletableRoots: [URL]
 
     public init(
         keyStore: any KeyStore, store: any PeopleStoring,
-        normalization: HandleNormalization = HandleNormalization()
+        normalization: HandleNormalization = HandleNormalization(),
+        deletableRoots: [URL] = DigestImporter.defaultDeletableRoots
     ) {
+        self.deletableRoots = deletableRoots
         self.keyStore = keyStore
         self.store = store
         self.resolver = HandleResolver(store: store, normalization: normalization)
     }
 
-    /// Imports the file at `url`, then deletes it (security-scoped access is honored).
+    /// Where imported files may be deleted from: the app container's temporary, Inbox and cache folders.
+    public static var defaultDeletableRoots: [URL] {
+        let home = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+        return [
+            FileManager.default.temporaryDirectory,
+            home.appendingPathComponent("tmp", isDirectory: true),
+            home.appendingPathComponent("Documents/Inbox", isDirectory: true),
+            home.appendingPathComponent("Library/Caches", isDirectory: true),
+        ]
+    }
+
+    /// Imports the file at `url`, then deletes it if it is inside the app container
+    /// (security-scoped access is honored).
     public func importDigest(url: URL) async throws -> DigestImportReport {
         let scoped = url.startAccessingSecurityScopedResource()
         defer {
-            Self.removeQuietly(url)
+            removeIfOwned(url)
             if scoped { url.stopAccessingSecurityScopedResource() }
         }
         let data: Data
@@ -120,18 +143,21 @@ public struct DigestImporter: Sendable {
         }
 
         let digest = Self.renormalized(opened.digest, region: opened.normalizerRegion)
+        if let stored = try? await store.latestDigest(), digest.generatedAt < stored.generatedAt {
+            throw DigestImportError.staleDigest
+        }
         do {
             try await store.saveDigest(digest)
         } catch {
             throw DigestImportError.saveFailed
         }
 
-        var resolved = 0
+        var resolved = Set<PersonID>()
         for entry in digest.entries {
-            if (try? await resolver.resolve(entry)) != nil { resolved += 1 }
+            if let id = try? await resolver.resolve(entry) { resolved.insert(id) }
         }
         return DigestImportReport(
-            entryCount: digest.entries.count, resolvedPeople: resolved, generatedAt: digest.generatedAt)
+            entryCount: digest.entries.count, resolvedPeople: resolved.count, generatedAt: digest.generatedAt)
     }
 
     static func map(_ error: DigestEnvelopeError) -> DigestImportError {
@@ -146,10 +172,12 @@ public struct DigestImporter: Sendable {
 
     static func renormalized(_ digest: InteractionDigest, region: String) -> InteractionDigest {
         let normalizer = HandleNormalizer(region: region)
+        let known = HandleNormalizer.isKnownRegion(region)
         var merged: [String: InteractionDigest.Entry] = [:]
         var order: [String] = []
         for entry in digest.entries {
             let handle = normalizer.normalize(entry.handle)
+            if !known, isBarePhoneLike(handle) { continue }
             var e = entry
             e.handle = handle
             if let existing = merged[handle] {
@@ -188,8 +216,22 @@ public struct DigestImporter: Sendable {
             messagesAllTime: a.messagesAllTime + b.messagesAllTime, awaitingMyReply: awaiting)
     }
 
-    private static func removeQuietly(_ url: URL) {
+    /// Phone-like (no letters, >= 7 digits) but without a "+": ambiguous without a known region.
+    static func isBarePhoneLike(_ handle: String) -> Bool {
+        guard !handle.hasPrefix("+"), !handle.contains("@"), !handle.contains(where: \.isLetter) else {
+            return false
+        }
+        return handle.filter { $0.isASCII && $0.isNumber }.count >= 7
+    }
+
+    private func removeIfOwned(_ url: URL) {
         guard url.isFileURL else { return }
+        let path = url.resolvingSymlinksInPath().standardizedFileURL.path
+        let owned = deletableRoots.contains { root in
+            let r = root.resolvingSymlinksInPath().standardizedFileURL.path
+            return path.hasPrefix(r.hasSuffix("/") ? r : r + "/")
+        }
+        guard owned else { return }
         try? FileManager.default.removeItem(at: url)
     }
 }

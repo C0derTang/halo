@@ -82,4 +82,37 @@ private struct StubAuth: Authenticating {
         #expect(image.width > 20)
         #expect(image.width == image.height)
     }
+
+    @Test func repairSurvivesDialogResettingBinding() async {
+        let model = PairingModel(provider: FakeProvider(), authenticator: StubAuth(result: true))
+        await model.unlock()
+        model.requestRepair()
+        model.isConfirmingRepair = false  // SwiftUI dismisses the dialog before the action runs
+        model.confirmRepair()
+        #expect(model.payload == "payload-1")
+    }
+
+    @Test func lockBetweenRequestAndConfirmBlocksRepair() async {
+        let provider = FakeProvider()
+        let model = PairingModel(provider: provider, authenticator: StubAuth(result: true))
+        await model.unlock()
+        model.requestRepair()
+        model.lock()
+        await model.unlock()
+        model.confirmRepair()
+        #expect(model.payload == "payload-0")
+    }
+
+    @Test func qrCachedPerPayloadAndHasQuietZone() async throws {
+        let model = PairingModel(provider: FakeProvider(), authenticator: StubAuth(result: true))
+        #expect(model.qrImage == nil)
+        await model.unlock()
+        let image = try #require(model.qrImage)
+        // Corner pixel region is white padding: width is larger than the bare QR.
+        let bare = try #require(PairingQR.image(for: "payload-0", scale: 8))
+        #expect(image.width == bare.width)
+        #expect(image.width % 8 == 0)
+        model.lock()
+        #expect(model.qrImage == nil)
+    }
 }

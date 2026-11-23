@@ -8,14 +8,19 @@ import SwiftUI
 
 /// QR rendering for the pairing payload (CoreImage `CIQRCodeGenerator`).
 public enum PairingQR {
-    /// Crisp, integer-scaled QR for `payload`, or nil if generation fails.
+    /// Crisp, integer-scaled QR for `payload` on a white background with a 4-module quiet zone,
+    /// or nil if generation fails.
     public static func image(for payload: String, scale: CGFloat = 8) -> CGImage? {
         let filter = CIFilter.qrCodeGenerator()
         filter.message = Data(payload.utf8)
         filter.correctionLevel = "M"
         guard let output = filter.outputImage else { return nil }
         let scaled = output.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
-        return CIContext().createCGImage(scaled, from: scaled.extent)
+        let quiet = 4 * scale
+        let canvas = scaled.extent.insetBy(dx: -quiet, dy: -quiet)
+        let white = CIImage(color: .white).cropped(to: canvas)
+        let composed = scaled.composited(over: white)
+        return CIContext().createCGImage(composed, from: canvas)
     }
 }
 
@@ -29,7 +34,7 @@ public struct PairingView: View {
         List {
             Section {
                 if let payload = model.payload {
-                    if let image = PairingQR.image(for: payload) {
+                    if let image = model.qrImage {
                         Image(decorative: image, scale: 1)
                             .interpolation(.none)
                             .resizable()

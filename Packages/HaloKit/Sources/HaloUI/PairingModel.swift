@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 import Observation
 
@@ -14,12 +15,22 @@ public protocol PairingKeyProviding: Sendable {
 @Observable @MainActor
 public final class PairingModel {
     /// The payload to render and copy; nil while locked.
-    public private(set) var payload: String?
+    public private(set) var payload: String? {
+        didSet {
+            guard payload != oldValue else { return }
+            qrImage = payload.flatMap { PairingQR.image(for: $0) }
+        }
+    }
+    /// QR for `payload`, rendered once per payload (not on every view update).
+    public private(set) var qrImage: CGImage?
     public private(set) var errorMessage: String?
     public var isConfirmingRepair = false
 
     public var isUnlocked: Bool { payload != nil }
 
+    /// Set by `requestRepair`; independent of `isConfirmingRepair`, which SwiftUI may reset when the
+    /// dialog dismisses before the button action runs.
+    @ObservationIgnored private var repairArmed = false
     @ObservationIgnored private let provider: any PairingKeyProviding
     @ObservationIgnored private let authenticator: any Authenticating
 
@@ -49,18 +60,24 @@ public final class PairingModel {
     public func lock() {
         payload = nil
         isConfirmingRepair = false
+        repairArmed = false
     }
 
     public func requestRepair() {
         guard isUnlocked else { return }
+        repairArmed = true
         isConfirmingRepair = true
     }
 
-    public func cancelRepair() { isConfirmingRepair = false }
+    public func cancelRepair() {
+        repairArmed = false
+        isConfirmingRepair = false
+    }
 
     /// Rotates the key after the user confirmed. Old digests become unreadable.
     public func confirmRepair() {
-        guard isUnlocked, isConfirmingRepair else { return }
+        guard isUnlocked, repairArmed else { return }
+        repairArmed = false
         isConfirmingRepair = false
         do {
             payload = try provider.rotate()

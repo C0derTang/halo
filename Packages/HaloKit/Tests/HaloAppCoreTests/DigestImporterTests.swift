@@ -172,12 +172,70 @@ private func expectImportError(
         #expect(report.resolvedPeople == 1)
     }
 
-    @Test func unknownSenderRegionNeverGuessesCountryCode() async throws {
+    @Test func unknownSenderRegionDropsBarePhoneNumbersButKeepsSafeHandles() async throws {
         let h = try Harness()
-        let data = try h.sealed(digest([entry("0791 1123456")]), region: "ZZ")
-        _ = try await h.importer.importDigest(data: data)
-        let handle = try #require(await h.store.saved.first?.entries.first?.handle)
-        #expect(!handle.hasPrefix("+"))
+        let data = try h.sealed(
+            digest([entry("0791 1123456"), entry("+15551230001"), entry("a@b.co")]), region: "ZZ")
+        let report = try await h.importer.importDigest(data: data)
+        let handles = try #require(await h.store.saved.first).entries.map(\.handle)
+        #expect(handles == ["+15551230001", "a@b.co"])
+        #expect(report.entryCount == 2)
+    }
+
+    @Test func staleDigestRejectedAndFileDeleted() async throws {
+        let h = try Harness()
+        let newer = InteractionDigest(
+            generatedAt: Date(timeIntervalSince1970: 1_800_000_000), entries: [entry("+15551230001")])
+        _ = try await h.importer.importDigest(data: try h.sealed(newer))
+        let url = try h.inboxFile(try h.sealed(digest([entry("+15551230002")])))  // 1.7e9 < 1.8e9
+        await #expect(throws: DigestImportError.staleDigest) { try await h.importer.importDigest(url: url) }
+        #expect(await h.store.saved == [newer])
+        #expect(!h.exists(url))
+    }
+
+    @Test func fileOutsideAppContainerIsNeverDeleted() async throws {
+        let h = try Harness()
+        let elsewhere = DigestImporter(
+            keyStore: h.keys, store: h.store, normalization: HandleNormalization(region: "US"),
+            deletableRoots: [URL(fileURLWithPath: "/nonexistent-root")])
+        let url = try h.inboxFile(try h.sealed(digest([entry("+15551230001")])))
+        _ = try await elsewhere.importDigest(url: url)
+        #expect(h.exists(url))
+        let bad = try h.inboxFile(Data("junk".utf8))
+        await #expect(throws: DigestImportError.malformed) { try await elsewhere.importDigest(url: bad) }
+        #expect(h.exists(bad))
+    }
+
+    @Test func resolvedPeopleCountsDistinctPeople() async throws {
+        let h = try Harness()
+        let a = Person(displayName: "A", confirmed: true)
+        await h.store.add(
+            a,
+            identities: [
+                Identity(personID: a.id, kind: .phone, value: "+15551230001"),
+                Identity(personID: a.id, kind: .email, value: "a@b.co"),
+            ])
+        let report = try await h.importer.importDigest(
+            data: try h.sealed(digest([entry("+15551230001"), entry("a@b.co")])))
+        #expect(report.entryCount == 2)
+        #expect(report.resolvedPeople == 1)
+    }
+
+    @Test func mergeRecomputesAwaitingMyReply() async throws {
+        let t1 = Date(timeIntervalSince1970: 1_000)
+        let t2 = Date(timeIntervalSince1970: 2_000)
+        func merged(me: Date?, them: Date?) -> Bool {
+            let a = InteractionDigest.Entry(
+                handle: "+15551230001", lastMessageAt: nil, lastFromMeAt: me, lastFromThemAt: nil,
+                messagesLast30Days: 0, messagesAllTime: 0, awaitingMyReply: false)
+            let b = InteractionDigest.Entry(
+                handle: "(555) 123-0001", lastMessageAt: nil, lastFromMeAt: nil, lastFromThemAt: them,
+                messagesLast30Days: 0, messagesAllTime: 0, awaitingMyReply: true)
+            return DigestImporter.renormalized(digest([a, b]), region: "US").entries[0].awaitingMyReply
+        }
+        #expect(merged(me: t1, them: t2))  // they wrote last
+        #expect(!merged(me: t2, them: t1))  // I replied last
+        #expect(!merged(me: t1, them: t1))  // equal: not awaiting
     }
 
     @Test func entriesCollapsingToSameHandleAreMerged() async throws {
