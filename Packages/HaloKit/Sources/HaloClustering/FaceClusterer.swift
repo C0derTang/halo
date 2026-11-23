@@ -265,7 +265,7 @@ public struct FaceClusterer: Sendable {
         }
         let ids = ordered.map { embeddings[$0].id }
         return FaceCluster(
-            id: ids[0], space: space, memberIDs: ids, representativeID: embeddings[medoid].id,
+            trusted: ids[0], space: space, memberIDs: ids, representativeID: embeddings[medoid].id,
             cohesion: min(max(cohesion, -1), 1), centroid: normalized(sum))
     }
 

@@ -396,3 +396,27 @@ struct EnrollmentWorld {
         #expect(!Fixture.rawTraces(of: Fixture.needles(for: world.faces[3]), at: path).isEmpty)
     }
 }
+
+@Suite struct ReplaceClustersRollbackTests {
+    @Test func failureAfterForgottenSuggestionRollsBackFaceDeletes() async throws {
+        let world = try await EnrollmentWorld()
+        let store = world.store
+        let existing = [world.cluster("keep", world.ids(4, 5), suggested: world.known.id)]
+        try await store.replaceClusters(existing)
+        let embeddingsBefore = try await store.rowCount("embedding")
+
+        // First cluster suggests a person that does not exist (forgotten mid-scan): processing it
+        // deletes its member faces. The second is malformed and aborts the whole call.
+        let forgotten = world.cluster("ghost", world.ids(0, 1), suggested: PersonID())
+        let bad = world.cluster("bad", [])
+        await #expect(throws: PeopleStoreError.invalidCluster(id: "bad", reason: .empty)) {
+            try await store.replaceClusters([forgotten, bad])
+        }
+
+        // The face deletes were rolled back with everything else.
+        #expect(try await store.embeddings(ids: world.ids(0, 1)).count == 2)
+        #expect(try await store.rowCount("embedding") == embeddingsBefore)
+        #expect(try await store.clusters() == existing)
+        #expect(try await store.unassignedEmbeddings(space: Fixture.spaceA) == world.faces)
+    }
+}

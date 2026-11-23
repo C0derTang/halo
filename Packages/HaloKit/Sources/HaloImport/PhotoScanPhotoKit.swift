@@ -26,6 +26,104 @@ enum PhotoScanImageSizing {
     }
 }
 
+/// Turns a callback-style image request into one awaited result that cannot hang.
+///
+/// Delivery rules (PhotoKit `.opportunistic`: a degraded preview may come first, then a final
+/// image): degraded deliveries are ignored; the first non-degraded delivery resolves the load, with
+/// nil if it carries no image (unavailable locally, failed or cancelled). If no final delivery
+/// arrives within `timeout` (a degraded-only or never-called handler) the load resolves nil and the
+/// request is cancelled. Task cancellation also resolves nil and cancels the request.
+enum PhotoScanImageRequest {
+    /// Starts a request, calls `deliver(image, isDegraded)` for each delivery, and returns a cancel.
+    typealias Start =
+        (_ deliver: @escaping @Sendable (PhotoScanImage?, Bool) -> Void)
+        -> @Sendable () -> Void
+
+    /// Default wait for a final delivery.
+    static let defaultTimeout: Duration = .seconds(10)
+
+    static func load(timeout: Duration = defaultTimeout, start: Start) async -> PhotoScanImage? {
+        let resolver = Resolver()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                resolver.install(continuation)
+                let timer = Task {
+                    try await Task.sleep(for: timeout)
+                    resolver.finish(nil)
+                }
+                resolver.onFinish { timer.cancel() }
+                let cancel = start { image, isDegraded in
+                    if isDegraded { return }
+                    resolver.finish(image)
+                }
+                resolver.setCancel(cancel)
+            }
+        } onCancel: {
+            resolver.finish(nil)
+        }
+    }
+
+    private final class Resolver: Sendable {
+        private struct State {
+            var continuation: CheckedContinuation<PhotoScanImage?, Never>?
+            var cancel: (@Sendable () -> Void)?
+            var cleanup: (@Sendable () -> Void)?
+            var done = false
+        }
+        private let state = Mutex(State())
+
+        func install(_ continuation: CheckedContinuation<PhotoScanImage?, Never>) {
+            // Cancellation can win the race before the continuation exists.
+            let alreadyDone = state.withLock { state -> Bool in
+                if state.done { return true }
+                state.continuation = continuation
+                return false
+            }
+            if alreadyDone { continuation.resume(returning: nil) }
+        }
+
+        func onFinish(_ cleanup: @escaping @Sendable () -> Void) {
+            let runNow = state.withLock { state -> Bool in
+                if state.done { return true }
+                state.cleanup = cleanup
+                return false
+            }
+            if runNow { cleanup() }
+        }
+
+        func setCancel(_ cancel: @escaping @Sendable () -> Void) {
+            let runNow = state.withLock { state -> Bool in
+                if state.done { return true }
+                state.cancel = cancel
+                return false
+            }
+            if runNow { cancel() }
+        }
+
+        /// First call wins; later deliveries, the timeout and cancellation are no-ops.
+        func finish(_ image: PhotoScanImage?) {
+            let (continuation, cancel, cleanup) = state.withLock {
+                state -> (
+                    CheckedContinuation<PhotoScanImage?, Never>?, (@Sendable () -> Void)?,
+                    (@Sendable () -> Void)?
+                ) in
+                if state.done { return (nil, nil, nil) }
+                state.done = true
+                defer {
+                    state.continuation = nil
+                    state.cancel = nil
+                    state.cleanup = nil
+                }
+                return (state.continuation, state.cancel, state.cleanup)
+            }
+            cleanup?()
+            // Cancelling after a final image is harmless; after a timeout it frees PhotoKit's work.
+            cancel?()
+            continuation?.resume(returning: image)
+        }
+    }
+}
+
 #if canImport(Photos)
     /// `PhotoLibrarySource` over the user's Apple Photos library (PhotoKit).
     ///
@@ -33,8 +131,16 @@ enum PhotoScanImageSizing {
     /// creation date are enumerated. Pixels come only from what is already on the device:
     /// `requestImage` with `isNetworkAccessAllowed = false` returns the best local rendition (with
     /// "Optimize iPhone Storage" that is usually a local derivative rather than the full original).
-    /// When nothing usable is local the asset loads as nil and the scan skips it; it is never
-    /// downloaded (no network, invariant 2). Nothing here writes to the library.
+    /// Requests are `.opportunistic`: PhotoKit may first deliver a degraded preview (ignored), then a
+    /// final image, which with the network off is the best rendition already on the device (a
+    /// smaller local derivative counts; `.highQualityFormat` could return nil for it). A request that
+    /// never delivers a final image times out (10 s) and loads as nil.
+    ///
+    /// When nothing usable is local the asset loads as nil and the scan skips it (counted in
+    /// `assetsUnavailable`); it is never downloaded (no network, invariant 2). The scan cursor moves
+    /// past such assets and a completed pass does not revisit them: an asset whose pixels become
+    /// local later is picked up only if a future pass reaches it as new (it is then ordered by
+    /// creation date, so an old photo is not). Nothing here writes to the library.
     public struct PhotoKitLibrarySource: PhotoLibrarySource {
         public init() {}
 
@@ -72,16 +178,14 @@ enum PhotoScanImageSizing {
             let target = PhotoScanImageSizing.targetSize(
                 pixelWidth: phAsset.pixelWidth, pixelHeight: phAsset.pixelHeight, maxPixelSize: maxPixelSize)
             let options = Self.requestOptions()
-            let once = ResumeOnce()
-            return await withCheckedContinuation { continuation in
-                PHImageManager.default().requestImage(
+            return await PhotoScanImageRequest.load { deliver in
+                let id = PHImageManager.default().requestImage(
                     for: phAsset, targetSize: target, contentMode: .aspectFit, options: options
                 ) { image, info in
-                    // `.highQualityFormat` delivers once; ignore a degraded pass defensively.
-                    if (info?[PHImageResultIsDegradedKey] as? Bool) == true { return }
-                    let loaded = image.flatMap(Self.scanImage)
-                    if once.claim() { continuation.resume(returning: loaded) }
+                    let degraded = (info?[PHImageResultIsDegradedKey] as? Bool) == true
+                    deliver(image.flatMap(Self.scanImage), degraded)
                 }
+                return { PHImageManager.default().cancelImageRequest(id) }
             }
         }
 
@@ -90,7 +194,7 @@ enum PhotoScanImageSizing {
             let options = PHImageRequestOptions()
             options.isNetworkAccessAllowed = false
             options.version = .current
-            options.deliveryMode = .highQualityFormat
+            options.deliveryMode = .opportunistic
             options.resizeMode = .fast
             options.isSynchronous = false
             return options
@@ -126,16 +230,5 @@ enum PhotoScanImageSizing {
                 return PhotoScanImage(image: cgImage, orientation: .up)
             }
         #endif
-    }
-
-    /// Guards a continuation against a second PhotoKit callback.
-    private final class ResumeOnce: Sendable {
-        private let done = Mutex(false)
-        func claim() -> Bool {
-            done.withLock { done in
-                defer { done = true }
-                return !done
-            }
-        }
     }
 #endif

@@ -25,7 +25,9 @@ import ImageIO
 public actor CoreMLFaceEmbedder: FaceEmbedder, FrameFaceEmbedding {
     /// File name `fetch-models.sh` produces and the app bundles.
     public static let defaultModelName = "HaloFaceEmbedder"
-    /// `EmbeddingSpace.modelID` for the default weights. Change whenever the weights change.
+    /// `EmbeddingSpace.modelID` for the default weights. Change whenever the weights OR the
+    /// alignment/preprocessing change (`FaceAligner`, `Preprocessing`): embeddings from different
+    /// pipelines are not comparable, and a stale ID would let them be matched against each other.
     public static let defaultModelID = "insightface-w600k_mbf-buffalo_sc-v0.7"
 
     /// Tensor-input normalization: `(pixel - mean) * scale`, channels in `channelOrder`.
