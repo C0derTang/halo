@@ -201,6 +201,17 @@ private func refs(_ embeddings: [FaceEmbedding]) -> [String] {
         #expect(stored.first?.quality == 0.9)
     }
 
+    @Test func storedEmbeddingsCarryTheObservationBox() async throws {
+        let observation = F.face(identity: 0, side: 0.25)
+        let (library, detector) = F.library([[observation]])
+        let store = PhotoScanFakeStore()
+        _ = try await makeJob(library, detector, store).run()
+        let stored = await store.embeddings
+        #expect(stored.count == 1)
+        #expect(stored.first?.faceBox == observation.boundingBox)
+        #expect(stored.first?.faceBox == CGRect(x: 0.3, y: 0.3, width: 0.25, height: 0.25))
+    }
+
     @Test func singleEmbedFailureIsSkipped() async throws {
         let (library, detector) = F.library([
             [F.face(identity: -1), F.face(identity: 1)], [F.face(identity: 2)],
