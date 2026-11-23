@@ -12,7 +12,8 @@ final class SyntheticChatDB {
     private let queue: DatabaseQueue
     private var nextMessage: Int64 = 1
 
-    init(wal: Bool = false) throws {
+    /// `tapbackColumn` adds the modern `message.associated_message_type` column.
+    init(wal: Bool = false, tapbackColumn: Bool = false) throws {
         dir = FileManager.default.temporaryDirectory.appendingPathComponent(
             "halo-test-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -38,6 +39,21 @@ final class SyntheticChatDB {
                     CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER);
                     CREATE TABLE chat_handle_join (chat_id INTEGER, handle_id INTEGER);
                     """)
+            if tapbackColumn {
+                try db.execute(
+                    sql: "ALTER TABLE message ADD COLUMN associated_message_type INTEGER DEFAULT 0")
+            }
+        }
+    }
+
+    /// Adds a tapback (reaction) row; requires `tapbackColumn`.
+    func addTapback(chat: Int64, handle: Int64, fromMe: Bool, at date: Date, type: Int64 = 2000) throws {
+        try addMessage(chat: chat, handle: handle, fromMe: fromMe, at: date)
+        try queue.write { db in
+            try db.execute(
+                sql:
+                    "UPDATE message SET associated_message_type = ? WHERE ROWID = (SELECT MAX(ROWID) FROM message)",
+                arguments: [type])
         }
     }
 
