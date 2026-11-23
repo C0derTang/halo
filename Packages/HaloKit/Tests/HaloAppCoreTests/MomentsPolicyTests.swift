@@ -30,4 +30,16 @@ import Testing
         #expect(MomentsPolicy.sanitize("   ") == nil)
         #expect(MomentsPolicy.sanitize(String(repeating: "a", count: 60)) == nil)
     }
+
+    @Test func catchesHitsStraddlingWindowBoundariesInLongNotes() {
+        // Pad so the sensitive word / number lands at many offsets, mid-note and at the end.
+        let filler = "we walked around the park and talked"
+        for pad in 0..<45 {
+            let lead = String(repeating: "x", count: pad)
+            let prefix = filler + " " + lead + " " + filler + " "
+            #expect(MomentsPolicy.sanitize(prefix + "her surgery went well " + filler) == nil)
+            #expect(MomentsPolicy.sanitize(prefix + "call 555 123 4567 " + filler) == nil)
+            #expect(MomentsPolicy.sanitize(prefix + "visit acme.com " + filler) == nil)
+        }
+    }
 }

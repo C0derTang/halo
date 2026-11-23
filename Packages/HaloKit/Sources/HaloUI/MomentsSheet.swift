@@ -5,6 +5,7 @@ import SwiftUI
 public struct MomentsSheet: View {
     @Bindable var model: MomentsModel
     let onDone: () -> Void
+    @Environment(\.scenePhase) private var scenePhase
 
     public init(model: MomentsModel, onDone: @escaping () -> Void) {
         self.model = model
@@ -78,6 +79,10 @@ public struct MomentsSheet: View {
         }
         .padding(16)
         .task { await model.prepareDictation() }
+        .onDisappear { model.stopDictation() }
+        .onChange(of: scenePhase) { _, phase in
+            if phase != .active { model.stopDictation() }
+        }
         .presentationDetents([.height(260), .medium])
     }
 }

@@ -55,6 +55,16 @@ public final class OnDeviceSpeechTranscriber: SpeechTranscribing {
     }
 }
 
+#if os(iOS)
+    private struct SavedSession {
+        var category: AVAudioSession.Category
+        var mode: AVAudioSession.Mode
+        var options: AVAudioSession.CategoryOptions
+    }
+#else
+    private struct SavedSession {}
+#endif
+
 private enum DictationError: Error { case notPermitted, unsupported }
 
 /// Owns the audio engine and recognition task for one dictation. All mutable state is guarded by
@@ -67,6 +77,7 @@ private final class DictationSession: @unchecked Sendable {
     private var task: SFSpeechRecognitionTask?
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var stopped = false
+    private var previous: SavedSession?
 
     init(localeIdentifier: String, continuation: AsyncThrowingStream<String, Error>.Continuation) {
         self.localeIdentifier = localeIdentifier
@@ -91,6 +102,8 @@ private final class DictationSession: @unchecked Sendable {
         do {
             #if os(iOS)
                 let audio = AVAudioSession.sharedInstance()
+                saveSession(
+                    SavedSession(category: audio.category, mode: audio.mode, options: audio.categoryOptions))
                 try audio.setCategory(.record, mode: .measurement, options: .duckOthers)
                 try audio.setActive(true, options: .notifyOthersOnDeactivation)
             #endif
@@ -98,9 +111,14 @@ private final class DictationSession: @unchecked Sendable {
             input.installTap(onBus: 0, bufferSize: 1024, format: input.outputFormat(forBus: 0)) {
                 buffer, _ in request.append(buffer)
             }
+            // Visible to stop() from here on, so any failure or stop tears the tap down.
+            if !installEngine(engine, request) {
+                return teardown(engine: engine, task: nil, request: request)
+            }
             engine.prepare()
             try engine.start()
         } catch {
+            stop()
             return fail(error)
         }
         let task = recognizer.recognitionTask(with: request) { [continuation] result, error in
@@ -111,36 +129,58 @@ private final class DictationSession: @unchecked Sendable {
                 continuation.finish(throwing: error)
             }
         }
-        if !install(engine: engine, task: task, request: request) {
-            task.cancel()
-            engine.stop()
-            engine.inputNode.removeTap(onBus: 0)
-        }
+        if !installTask(task) { task.cancel() }
     }
 
-    /// Returns false when `stop()` already ran, in which case the caller tears everything down.
-    private func install(
-        engine: AVAudioEngine, task: SFSpeechRecognitionTask,
-        request: SFSpeechAudioBufferRecognitionRequest
-    ) -> Bool {
+    /// Returns false when `stop()` already ran; the caller then tears down what it created.
+    private func installEngine(_ engine: AVAudioEngine, _ request: SFSpeechAudioBufferRecognitionRequest)
+        -> Bool
+    {
         lock.withLock {
             if stopped { return false }
             self.engine = engine
-            self.task = task
             self.request = request
             return true
         }
     }
 
-    func stop() {
-        let (engine, task, request) = lock.withLock {
-            stopped = true
-            let taken = (self.engine, self.task, self.request)
-            self.engine = nil
-            self.task = nil
-            self.request = nil
-            return taken
+    private func installTask(_ task: SFSpeechRecognitionTask) -> Bool {
+        lock.withLock {
+            if stopped { return false }
+            self.task = task
+            return true
         }
+    }
+
+    private func saveSession(_ saved: SavedSession) { lock.withLock { previous = saved } }
+
+    /// Idempotent: tears down tap, engine, recognition and the audio session exactly once.
+    func stop() {
+        let taken = lock.withLock { () -> Taken? in
+            if stopped && engine == nil && task == nil && request == nil && previous == nil { return nil }
+            stopped = true
+            let t = Taken(engine: engine, task: task, request: request, previous: previous)
+            engine = nil
+            task = nil
+            request = nil
+            previous = nil
+            return t
+        }
+        guard let taken else { return }
+        teardown(engine: taken.engine, task: taken.task, request: taken.request, previous: taken.previous)
+    }
+
+    private struct Taken {
+        var engine: AVAudioEngine?
+        var task: SFSpeechRecognitionTask?
+        var request: SFSpeechAudioBufferRecognitionRequest?
+        var previous: SavedSession?
+    }
+
+    private func teardown(
+        engine: AVAudioEngine?, task: SFSpeechRecognitionTask?,
+        request: SFSpeechAudioBufferRecognitionRequest?, previous: SavedSession? = nil
+    ) {
         request?.endAudio()
         task?.cancel()
         if let engine {
@@ -148,7 +188,11 @@ private final class DictationSession: @unchecked Sendable {
             engine.inputNode.removeTap(onBus: 0)
         }
         #if os(iOS)
-            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            let audio = AVAudioSession.sharedInstance()
+            try? audio.setActive(false, options: .notifyOthersOnDeactivation)
+            if let previous {
+                try? audio.setCategory(previous.category, mode: previous.mode, options: previous.options)
+            }
         #endif
     }
 

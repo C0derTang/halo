@@ -52,6 +52,9 @@ public final class MomentsModel {
     @ObservationIgnored private let now: @Sendable () -> Date
     @ObservationIgnored private var dictationTask: Task<Void, Never>?
     @ObservationIgnored private var dictationBase = ""
+    @ObservationIgnored private var dictationToken = 0
+    /// People already written by an earlier (partially failed) save: a retry never duplicates them.
+    @ObservationIgnored private var savedIDs: Set<PersonID> = []
 
     /// - Parameter verifyConfirmed: optional live re-check at save time (e.g. the person may have
     ///   been forgotten while the sheet was open). Persons failing it are never written.
@@ -93,6 +96,7 @@ public final class MomentsModel {
 
     /// Clamps to `maxLength` characters.
     public func setText(_ newValue: String) {
+        if newValue != text { savedIDs.removeAll() }
         text = newValue.count > Self.maxLength ? String(newValue.prefix(Self.maxLength)) : newValue
     }
 
@@ -115,21 +119,27 @@ public final class MomentsModel {
         isDictating = true
         errorMessage = nil
         dictationBase = text.isEmpty || text.hasSuffix(" ") ? text : text + " "
+        dictationToken += 1
+        let token = dictationToken
         dictationTask = Task { [weak self] in
             do {
                 for try await partial in speech.transcribe() {
-                    guard let self else { return }
+                    guard let self, self.dictationToken == token else { return }
                     self.setText(self.dictationBase + partial)
                 }
             } catch is CancellationError {
             } catch {
-                self?.errorMessage = "Dictation stopped."
+                if let self, self.dictationToken == token { self.errorMessage = "Dictation stopped." }
             }
-            self?.isDictating = false
+            // A stale session must not flip the flag of a newer one.
+            if let self, self.dictationToken == token { self.isDictating = false }
         }
     }
 
+    /// Cancels the dictation task immediately; cancelling the consumer terminates the stream, which
+    /// stops the microphone. Late partials from the old session are ignored via the token.
     public func stopDictation() {
+        dictationToken += 1
         dictationTask?.cancel()
         dictationTask = nil
         isDictating = false
@@ -151,13 +161,16 @@ public final class MomentsModel {
         defer { isSaving = false }
         let created = now()
         var failed = false
-        for person in people where selected.contains(person.id) {
+        for person in people where selected.contains(person.id) && !savedIDs.contains(person.id) {
             if let verifyConfirmed, !(await verifyConfirmed(person.id)) {
                 failed = true
                 continue
             }
             let hook = MemoryHook(personID: person.id, text: clean, source: .moment, createdAt: created)
-            do { try await store.addHook(hook) } catch { failed = true }
+            do {
+                try await store.addHook(hook)
+                savedIDs.insert(person.id)
+            } catch { failed = true }
         }
         if failed {
             errorMessage = "Could not save for everyone."

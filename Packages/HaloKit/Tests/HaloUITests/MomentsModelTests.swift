@@ -34,6 +34,25 @@ private struct FakeSpeech: SpeechTranscribing {
     }
 }
 
+private final class TerminationFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+    var terminated: Bool { lock.withLock { value } }
+    func set() { lock.withLock { value = true } }
+}
+
+/// Never-ending stream whose termination (mic release) is observable.
+private struct HangingSpeech: SpeechTranscribing {
+    let flag: TerminationFlag
+    var isOnDeviceAvailable: Bool { get async { true } }
+    func transcribe() -> AsyncThrowingStream<String, Error> {
+        AsyncThrowingStream { c in
+            c.onTermination = { _ in flag.set() }
+            c.yield("hi")
+        }
+    }
+}
+
 private let alice = MomentsPerson(id: PersonID(), displayName: "Alice", isConfirmed: true)
 private let bob = MomentsPerson(id: PersonID(), displayName: "Bob", isConfirmed: true)
 private let stranger = MomentsPerson(id: PersonID(), displayName: "Maybe", isConfirmed: false)
@@ -179,5 +198,44 @@ private func make(
         for _ in 0..<200 where model.isDictating { await Task.yield() }
         #expect(model.text == "Met hello there")
         #expect(!model.isDictating)
+    }
+
+    @Test func stopDictationTerminatesTheStream() async {
+        let flag = TerminationFlag()
+        let model = make([alice], speech: HangingSpeech(flag: flag))
+        await model.prepareDictation()
+        model.startDictation()
+        for _ in 0..<200 where model.text.isEmpty { await Task.yield() }
+        #expect(model.isDictating)
+        model.stopDictation()
+        #expect(!model.isDictating)
+        for _ in 0..<2000 where !flag.terminated { await Task.yield() }
+        #expect(flag.terminated)
+    }
+
+    @Test func savingStopsDictation() async {
+        let flag = TerminationFlag()
+        let model = make([alice], speech: HangingSpeech(flag: flag))
+        await model.prepareDictation()
+        model.startDictation()
+        for _ in 0..<200 where model.text.isEmpty { await Task.yield() }
+        _ = await model.save()
+        for _ in 0..<2000 where !flag.terminated { await Task.yield() }
+        #expect(flag.terminated)
+    }
+
+    @Test func retryDoesNotDuplicateAlreadyWrittenHooks() async {
+        let store = MomentsFakeStore()
+        await store.setFail([bob.id])
+        let model = make([alice, bob], store: store)
+        model.toggle(alice.id)
+        model.toggle(bob.id)
+        model.setText("Hello")
+        #expect(await model.save() == false)
+        await store.setFail([])
+        #expect(await model.save())
+        let hooks = await store.hooks
+        #expect(hooks.count == 2)
+        #expect(Set(hooks.map(\.personID)) == [alice.id, bob.id])
     }
 }
