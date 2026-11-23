@@ -195,8 +195,9 @@ public final class PeopleStore: PeopleStoring, EnrollmentStoring, PrivacyStoring
                 try db.execute(
                     sql: """
                         INSERT INTO embedding
-                            (id, personId, modelID, dimension, vector, source, sourceRef, quality, createdAt)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            (id, personId, modelID, dimension, vector, source, sourceRef, quality, createdAt,
+                             faceBoxX, faceBoxY, faceBoxWidth, faceBoxHeight)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(id) DO UPDATE SET
                             personId = excluded.personId,
                             modelID = excluded.modelID,
@@ -205,13 +206,21 @@ public final class PeopleStore: PeopleStoring, EnrollmentStoring, PrivacyStoring
                             source = excluded.source,
                             sourceRef = excluded.sourceRef,
                             quality = excluded.quality,
-                            createdAt = excluded.createdAt
+                            createdAt = excluded.createdAt,
+                            faceBoxX = excluded.faceBoxX,
+                            faceBoxY = excluded.faceBoxY,
+                            faceBoxWidth = excluded.faceBoxWidth,
+                            faceBoxHeight = excluded.faceBoxHeight
                         """,
                     arguments: [
                         embedding.id.uuidString, embedding.personID?.description, embedding.space.modelID,
                         embedding.space.dimension, VectorCodec.encode(embedding.vector),
                         embedding.source.rawValue, embedding.sourceRef, Double(embedding.quality),
                         embedding.createdAt.storedValue,
+                        embedding.faceBox.map { Double($0.origin.x) },
+                        embedding.faceBox.map { Double($0.origin.y) },
+                        embedding.faceBox.map { Double($0.size.width) },
+                        embedding.faceBox.map { Double($0.size.height) },
                     ])
             }
             // An embedding that now belongs to someone can no longer sit in a suggestion cluster.

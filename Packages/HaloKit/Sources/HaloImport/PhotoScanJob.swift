@@ -301,7 +301,8 @@ public actor PhotoScanJob {
                 embeddings.append(
                     FaceEmbedding(
                         personID: nil, space: space, vector: vector, source: .photoLibrary, sourceRef: ref,
-                        quality: face.quality))
+                        quality: face.quality,
+                        faceBox: face.boundingBox))
             } catch is CancellationError {
                 throw CancellationError()
             } catch {

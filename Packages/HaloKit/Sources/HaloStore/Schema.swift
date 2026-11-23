@@ -97,6 +97,17 @@ enum Schema {
                     );
                     """)
         }
+        migrator.registerMigration("v3_faceBox") { db in
+            // Additive: where the face sat in its source image (normalized, top-left, upright). All four
+            // columns are NULL for rows written before this migration and for faces with no known box.
+            try db.execute(
+                sql: """
+                    ALTER TABLE embedding ADD COLUMN faceBoxX REAL;
+                    ALTER TABLE embedding ADD COLUMN faceBoxY REAL;
+                    ALTER TABLE embedding ADD COLUMN faceBoxWidth REAL;
+                    ALTER TABLE embedding ADD COLUMN faceBoxHeight REAL;
+                    """)
+        }
         return migrator
     }
 }
