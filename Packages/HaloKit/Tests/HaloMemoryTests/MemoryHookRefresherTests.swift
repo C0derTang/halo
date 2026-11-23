@@ -244,14 +244,14 @@ import Testing
         #expect(first.regenerated.isEmpty)
         #expect(await store.allHooks(for: ana.id).map(\.text) == ["Old summary"])
 
-        // Not counted for rate limiting: the next call reaches the availability check (not
-        // `.rateLimited`), and no failure was recorded.
-        #expect(try await refresher.refresh(now: t0.addingTimeInterval(1)) == .modelUnavailable)
-
-        // A fresh refresher shows nobody is backing off: the cached failures were never set.
-        let healthy = MemoryHookRefresher(store: store, generator: generator, minimumInterval: 0)
+        // Not counted for rate limiting and no failure recorded: the same refresher, default
+        // interval, regenerates one second later once the model is back.
         await generator.setTexts(["Started a new job at Acme"])
-        #expect(try report(try await healthy.refresh(now: t0.addingTimeInterval(2))).regenerated == [ana.id])
+        await lossy.restore()
+        let again = try report(try await refresher.refresh(now: t0.addingTimeInterval(1)))
+        #expect(again.regenerated == [ana.id])
+        #expect(again.backingOff.isEmpty)
+        #expect(again.failed.isEmpty)
     }
 
     @Test func unconfirmedSweepIsFullOnFirstRunThenNarrow() async throws {
@@ -479,6 +479,8 @@ actor LosesAvailabilityGenerator: MemoryHookGenerating {
     private var generated = false
     init(inner: FakeHookGenerator) { self.inner = inner }
     var isAvailable: Bool { !generated }
+    /// The model is back: available again.
+    func restore() { generated = false }
     func hooks(for person: Person, messages: [InteractionDigest.DigestMessage], now: Date) async throws
         -> [MemoryHook]
     {

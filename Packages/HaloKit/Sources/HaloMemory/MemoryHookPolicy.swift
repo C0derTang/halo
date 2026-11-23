@@ -45,31 +45,24 @@ public enum MemoryHookPolicy {
         return patterns.contains { lowered.range(of: $0, options: .regularExpression) != nil }
     }
 
-    /// Suffixes that make a dotted token look like a site or address. Language / framework names
-    /// ("Node.js", "Next.js", "Foo.py") are deliberately not here.
-    static let domainSuffixes: Set<String> = [
-        "com", "net", "org", "edu", "gov", "mil", "int", "info", "biz", "io", "co", "ai", "app", "dev",
-        "me", "tv", "us", "uk", "de", "fr", "es", "it", "nl", "be", "ch", "at", "se", "no", "dk", "fi",
-        "pl", "ru", "cn", "jp", "kr", "in", "au", "nz", "ca", "br", "mx", "ar", "za", "ie", "pt", "gr",
-        "tr", "il", "ae", "sg", "hk", "tw", "id", "ly", "to", "fm", "gg", "xyz", "online", "site", "shop",
-        "store", "link", "click", "top", "club", "page", "cloud", "tech", "blog", "live", "news", "ws",
-        "vc", "gl", "gd", "is", "eu", "asia", "cc", "ml", "tk", "ga", "cf", "gq", "su", "ua", "ro", "cz",
-        "hu", "sk", "bg", "hr", "lt", "lv", "ee", "ng", "ke", "eg", "sa", "pk", "bd", "vn", "th",
-        "my", "ph",
+    /// Suffixes of dotted tokens that are language / framework / file names, not sites ("Node.js").
+    /// Everything else after a dot ("acme.com", "acme.pro", "bob.xxx") is treated as a link.
+    static let exemptSuffixes: Set<String> = [
+        "js", "jsx", "ts", "tsx", "py", "rb", "rs", "go", "kt", "sh", "md", "cs", "swift", "java", "php",
+        "cpp", "hs", "ex", "exs", "lua", "json", "yml", "yaml", "toml", "html", "css", "txt", "pdf",
+        "png", "jpg", "gif", "csv",
     ]
 
-    /// "acme.com", "news.example.co" are links. Dotted tokens whose suffix is not a TLD-looking one
-    /// ("Node.js") are fine. Unknown suffixes of four or more letters are still treated as links, so
-    /// new gTLDs ("acme.tokyo") do not slip through.
+    /// True for any `word.suffix` token whose suffix is not in `exemptSuffixes`. Scanning resumes at
+    /// the START of each suffix, so chained tokens ("x.js.com", "blog.joe.com") are all examined.
     static func containsDomainLikeToken(_ lowered: String) -> Bool {
         var rest = lowered[...]
-        while let range = rest.range(
-            of: #"[a-z0-9-]+\.[a-z]{2,}\b"#, options: .regularExpression)
-        {
+        while let range = rest.range(of: #"[a-z0-9-]+\.[a-z]{2,}\b"#, options: .regularExpression) {
             let token = rest[range]
-            let suffix = token.split(separator: ".").last.map(String.init) ?? ""
-            if domainSuffixes.contains(suffix) || suffix.count >= 4 { return true }
-            rest = rest[range.upperBound...]
+            guard let dot = token.lastIndex(of: ".") else { return true }
+            let suffixStart = token.index(after: dot)
+            if !exemptSuffixes.contains(String(token[suffixStart...])) { return true }
+            rest = rest[suffixStart...]
         }
         return false
     }
@@ -130,6 +123,12 @@ public enum SensitiveTopicFilter {
     /// Race distances ("a 5k", "the 10k") that are not money when written with an article.
     static let raceDistancesK: Set<String> = ["5", "10", "15", "21", "42"]
 
+    /// A word right after "5k" that makes it money again ("a 5k raise").
+    static let moneyWords: Set<String> = [
+        "raise", "bonus", "salary", "loan", "fee", "fine", "bill", "tip", "rent", "debt", "price",
+        "pay", "payment", "income", "mortgage", "budget", "cost", "fees", "bills", "tips",
+    ]
+
     /// True when the text contains a money-looking amount. A "k" amount is NOT money when it is
     /// followed by "run"/"race" ("5k run"), or is a standard race distance preceded by "a"/"the"
     /// ("ran a 10k"). Deliberately narrower than "any k after a/the": "got a 50k raise" stays sensitive.
@@ -142,10 +141,12 @@ public enum SensitiveTopicFilter {
             guard unit == "k" else { return true }
             let after = lowered[Range(match.range, in: lowered)!.upperBound...]
                 .split(whereSeparator: { !$0.isLetter }).first.map(String.init)
+            guard raceDistancesK.contains(number) else { return true }
+            if let after, moneyWords.contains(after) { return true }
             if after == "run" || after == "runs" || after == "race" || after == "races" { continue }
             let before = lowered[..<Range(match.range, in: lowered)!.lowerBound]
                 .split(whereSeparator: { !$0.isLetter }).last.map(String.init)
-            if (before == "a" || before == "the") && raceDistancesK.contains(number) { continue }
+            if before == "a" || before == "the" { continue }
             return true
         }
         return false

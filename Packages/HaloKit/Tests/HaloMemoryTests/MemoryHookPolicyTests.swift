@@ -23,6 +23,7 @@ import Testing
         // Stay strict after the false-positive fixes.
         "The rabbi visited", "Rabbis at the dinner", "Got a 50k raise", "Earns 50k a year",
         "Has a 2m house",
+        "Got a 5k raise", "Wanted a 10k bonus", "Paid the 5k fee", "Got a 50k run", "Makes 7k race bonus",
     ])
     func sensitiveTopicsAreRejected(text: String) {
         #expect(SensitiveTopicFilter.isSensitive(text))
@@ -38,6 +39,7 @@ import Testing
         // False positives fixed in #71.
         "Rabbit hole fan", "Needs a ids badge", "Ran a 5k", "Ran the 10k", "Charity 5k run",
         "Weekend 10k race", "Maintains Node.js packages", "Fan of Vue.js", "Writes Next.js apps",
+        "Wrote main.py and util.rs", "Hacks on app.swift",
     ])
     func harmlessHooksPass(text: String) {
         #expect(!SensitiveTopicFilter.isSensitive(text))
@@ -48,7 +50,8 @@ import Testing
         "Blog: https://example.com", "Check www.example.org", "Email ana@example.com",
         "Now at acme.io", "Number is 5550001", "Call 555-000-1234", "Call (555) 000 1234",
         "Zip code 94110", "ftp://files", "DM me @ana_lima", "Reads news.ycombinator.com",
-        "Runs acme.tokyo", "See node.js and acme.dev",
+        "Runs acme.tokyo", "See node.js and acme.dev", "Reads blog.joe.com", "Mail mail.foo.com",
+        "Is john.doe.net", "Visit acme.pro", "Visit acme.vip", "Try bob.xxx", "Uses x.js.com",
     ])
     func linksEmailsAndPhoneNumbersAreRejected(text: String) {
         #expect(MemoryHookPolicy.containsContactOrLink(text))

@@ -214,6 +214,20 @@ struct WhisperAnnouncerTests {
         #expect(speech.spoken.count == 2)
     }
 
+    @Test func neverRetriesAfterThreeInterruptedAttemptsEvenAfterLongBackoff() {
+        let a = make(route: WhisperTestRoute([whisperWired]))
+        for attempt in 1...WhisperAnnouncer.maxInterruptedAttempts {
+            a.update([item(1, ada)])
+            #expect(speech.spoken.count == attempt)
+            speech.finish(.interrupted)
+            clock.advance(WhisperAnnouncer.retryBackoff + 1)
+        }
+        clock.advance(24 * 60 * 60)
+        a.update([item(1, ada)])
+        a.update([item(1, ada)])
+        #expect(speech.spoken.count == WhisperAnnouncer.maxInterruptedAttempts)
+    }
+
     @Test func interruptedRetriesAreCappedPerSession() {
         let a = make(route: WhisperTestRoute([whisperWired]))
         for _ in 0..<WhisperAnnouncer.maxInterruptedAttempts + 2 {
