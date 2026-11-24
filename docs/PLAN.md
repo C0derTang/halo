@@ -91,13 +91,14 @@ import, #50 follow-ups, #52 Lens screen, #53 CI toolchain compat, #54 compositio
 - #64 hook chips
 - #63 Whisper mode (headphone/confirmed-device only)
 
-**Wave 5 (in progress)**
-| Issue | Tier |
-|-------|------|
-| Wire memory hooks + Whisper into the app; #68 follow-ups | opus |
-| Moments: quick note on people in view → memory hook | sonnet |
-| Library follow-ups from #17 (memory filter, whisper retry cap, misc) | sonnet |
-| `halo-calibrate`: MatchPolicy calibration on public verification pairs | opus |
+**Wave 5: DONE.**
+- #76 memory hooks + Whisper + Moments wired into the app (kill switch stops every writer; Whisper is headphone/confirmed-device only and never runs while locked)
+- #73 Moments (on-device dictation)
+- #74 library follow-ups
+- #75/#77 `halo-calibrate` on LFW; production `MatchPolicy` is now 0.32 / 0.20 / 3
+
+**State:** 798 tests, lint, and the iOS build are green. Remaining polish items are tracked on #17. Next
+step is a device test (see `e2e/`).
 
 **Later (needs a decision):** ARKit 3D anchoring; TestFlight distribution; Android.
 
