@@ -6,7 +6,10 @@ set -uo pipefail
 for p in "$@"; do
   # Wait (up to 10 min) for a check run to be registered after a fresh push.
   for _ in $(seq 1 40); do
-    gh pr checks "$p" 2>&1 | grep -q "no checks reported" || break
+    # Capture first: under pipefail, `gh ... | grep -q` fails whenever gh exits non-zero (which it
+    # does while no checks exist), so the pipeline form broke out of this wait immediately.
+    out=$(gh pr checks "$p" 2>&1)
+    [[ "$out" == *"no checks reported"* ]] || break
     sleep 15
   done
   for attempt in 1 2; do

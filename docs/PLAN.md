@@ -100,6 +100,12 @@ import, #50 follow-ups, #52 Lens screen, #53 CI toolchain compat, #54 compositio
 **State:** 798 tests, lint, and the iOS build are green. Remaining polish items are tracked on #17. Next
 step is a device test (see `e2e/`).
 
+**Wave 6: DONE.**
+- #79 simulator demo camera (`scripts/sim-run.sh`, `e2e/simulator.md`): a local video plays through the real lens pipeline in the iOS Simulator
+- #83 Google Photos Picker importer (OAuth PKCE, Keychain tokens, picker session, download, on-device scan)
+- #82 Google Photos app wiring (kill switch, lock pause, thumbnails, People/Settings UI); #84 live importer
+- Setup: `e2e/google-photos.md`; personal values in gitignored `App/Local.xcconfig`
+
 **Later (needs a decision):** ARKit 3D anchoring; TestFlight distribution; Android.
 
 ## Known constraints (verified 2026-11)
