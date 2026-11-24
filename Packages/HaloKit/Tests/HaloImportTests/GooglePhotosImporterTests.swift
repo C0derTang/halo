@@ -18,7 +18,7 @@ private struct Harness {
     let dir = G.tempDirectory()
     let clock = FakeClock()
     let presenter: FakePresenter
-    let embedder = SyntheticEmbedder()
+    let embedder: SyntheticEmbedder
     let importer: GooglePhotosImporter
     let cache: GooglePhotosCache
 
@@ -27,16 +27,21 @@ private struct Harness {
         items: [FakeGoogle.Item], faces: [Int: [FaceObservation]] = [:],
         tokens: GoogleTokens? = G.validTokens(),
         presenter: FakePresenter = FakePresenter(), clientID: String? = G.clientID,
-        detector: ScriptedDetector? = nil
+        detector: ScriptedDetector? = nil, embedder: SyntheticEmbedder = SyntheticEmbedder(),
+        sessionCleanupTimeout: Duration = .seconds(3),
+        isSystemicFailure: @escaping @Sendable (any Error) -> Bool = { _ in false }
     ) {
         google = FakeGoogle(items: items)
         (tokenStore, keys) = G.tokenStore(tokens)
         self.presenter = presenter
-        let config = GooglePhotosImportConfig(scan: PhotoScanConfig(maxPixelSize: 2048))
+        self.embedder = embedder
+        let config = GooglePhotosImportConfig(
+            scan: PhotoScanConfig(maxPixelSize: 2048), sessionCleanupTimeout: sessionCleanupTimeout)
         importer = GooglePhotosImporter(
             clientID: clientID, store: store, detector: detector ?? ScriptedDetector(facesByWidth: faces),
             embedder: embedder, presenter: presenter, transport: google, tokenStore: tokenStore,
-            cacheDirectory: dir, config: config, clock: clock, now: { G.now })
+            cacheDirectory: dir, config: config, clock: clock, now: { G.now },
+            isSystemicFailure: isSystemicFailure)
         cache = GooglePhotosCache(directory: dir)
     }
 
@@ -170,6 +175,31 @@ private func downloadStarted(_ google: FakeGoogle, id: String, hang: Bool) -> As
         #expect(second.skipped == 3)  // video + m0 + m2
         // Only the face-less photo is fetched again (it was not kept).
         #expect(Array(h.google.with { $0.downloads }.dropFirst(downloadsBefore)) == ["m3"])
+        // Nothing new: stored suggestions (the Apple scan's too) are not rewritten.
+        #expect(await h.store.replaceClustersCalls == 1)
+    }
+
+    @Test func systemicFailureAbortsInsteadOfSkippingEveryFace() async throws {
+        let h = Harness(
+            items: [photo(0), photo(2)], faces: standardFaces, embedder: SyntheticEmbedder(alwaysFails: true),
+            isSystemicFailure: { $0 is SyntheticEmbedder.Failure })
+        defer { h.cleanUp() }
+        await #expect(throws: SyntheticEmbedder.Failure.self) {
+            _ = try await h.importer.importPicked { _ in }
+        }
+        #expect(await h.store.embeddings.isEmpty)
+        #expect(await h.store.replaceClustersCalls == 0)
+        #expect(h.embedder.sizes.all.count == 1)  // stopped at the first face
+    }
+
+    @Test func nonSystemicEmbedFailuresAreSkipped() async throws {
+        let h = Harness(
+            items: [photo(0), photo(2)], faces: standardFaces, embedder: SyntheticEmbedder(alwaysFails: true))
+        defer { h.cleanUp() }
+        let result = try await h.importer.importPicked { _ in }
+        #expect(result.facesEmbedded == 0)
+        #expect(await h.store.embeddings.isEmpty)
+        #expect(await h.store.replaceClustersCalls == 0)
     }
 
     @Test func photosNoLongerBackingAFaceAreDroppedFromTheCache() async throws {
@@ -341,6 +371,24 @@ private func downloadStarted(_ google: FakeGoogle, id: String, hang: Bool) -> As
         #expect(h.google.requests.all.count == requestsAtErase)
         #expect(!h.dirExists)
         #expect(h.keys.isEmpty)
+    }
+
+    @Test func eraseAllDoesNotWaitOnASlowSessionDelete() async throws {
+        let h = Harness(
+            items: [photo(0), photo(2)], faces: standardFaces, sessionCleanupTimeout: .milliseconds(200))
+        defer { h.cleanUp() }
+        h.google.with { $0.hangDelete = true }
+        let started = downloadStarted(h.google, id: "m2", hang: true)
+        let task = Task { try await h.importer.importPicked { _ in } }
+        for await _ in started { break }
+
+        let begin = ContinuousClock.now
+        try await h.importer.eraseAll()
+        #expect(ContinuousClock.now - begin < .seconds(10))  // the DELETE hangs for 30 s
+        #expect(h.keys.isEmpty)
+        #expect(!h.dirExists)
+        await #expect(throws: CancellationError.self) { _ = try await task.value }
+        #expect(h.google.requests.all.contains { $0.httpMethod == "DELETE" })
     }
 
     @Test func eraseAllWithoutAnImportDeletesTokensAndPhotos() async throws {

@@ -15,16 +15,20 @@ public struct GooglePhotosImportConfig: Hashable, Sendable {
     public var baseURLLifetime: Duration
     /// Face filter, scan image size and clustering attempts (shared with the Apple Photos scan).
     public var scan: PhotoScanConfig
+    /// Longest wait (real time) for the best-effort picker session DELETE.
+    public var sessionCleanupTimeout: Duration
 
     public init(
         maxItemCount: Int = 200, pageSize: Int = 100, downloadPixelSize: Int = 2048,
-        baseURLLifetime: Duration = .seconds(55 * 60), scan: PhotoScanConfig = PhotoScanConfig()
+        baseURLLifetime: Duration = .seconds(55 * 60), scan: PhotoScanConfig = PhotoScanConfig(),
+        sessionCleanupTimeout: Duration = .seconds(3)
     ) {
         self.maxItemCount = maxItemCount
         self.pageSize = pageSize
         self.downloadPixelSize = downloadPixelSize
         self.baseURLLifetime = baseURLLifetime
         self.scan = scan
+        self.sessionCleanupTimeout = sessionCleanupTimeout
     }
 }
 
@@ -220,7 +224,11 @@ public actor GooglePhotosImporter: GooglePhotosImporting {
             state.picked = photos.count
             state.skipped = items.count - photos.count
 
-            let embedded = try await embeddedItemIDs()
+            // Read once per run, as late as possible (after the picker): the app's embedder loads
+            // lazily and reports a placeholder space until then. Dedupe, scan and clustering all
+            // use this one value.
+            let space = embedder.space
+            let embedded = try await embeddedItemIDs(space: space)
             // Photos that no longer back an embedding (rejected faces, forgotten people) and are
             // not picked again go; a picked photo downloaded by a cancelled import is reused.
             try? cache.prune(keepingItemIDs: embedded.union(photos.map(\.id)))
@@ -257,15 +265,18 @@ public actor GooglePhotosImporter: GooglePhotosImporting {
             publish(.scanning)
             for photo in toScan {
                 try Task.checkCancellation()
-                let (faces, skipped) = try await scan(photo)
+                let (faces, skipped) = try await scan(photo, space: space)
                 state.facesEmbedded += faces
                 if skipped { state.skipped += 1 }
                 publish(.scanning)
             }
 
-            publish(.clustering)
-            _ = try await refresher.refreshRetrying(
-                space: embedder.space, full: true, attempts: config.scan.clusteringAttempts)
+            // Nothing new: leave the stored suggestions (including the Apple scan's) untouched.
+            if state.facesEmbedded > 0 {
+                publish(.clustering)
+                _ = try await refresher.refreshRetrying(
+                    space: space, full: true, attempts: config.scan.clusteringAttempts)
+            }
             publish(.finished)
             return state
         } catch {
@@ -303,7 +314,9 @@ public actor GooglePhotosImporter: GooglePhotosImporting {
     /// Detect, filter and embed one cached photo; persists its unassigned embeddings. Returns how
     /// many faces were embedded, and whether the photo could not be scanned at all. A photo with no
     /// embedded face is removed from the cache.
-    private func scan(_ photo: PickedMediaItem) async throws -> (faces: Int, skipped: Bool) {
+    private func scan(_ photo: PickedMediaItem, space: EmbeddingSpace) async throws -> (
+        faces: Int, skipped: Bool
+    ) {
         guard let image = cache.image(forItemID: photo.id, maxPixelSize: config.scan.maxPixelSize) else {
             try? cache.remove(itemID: photo.id)
             return (0, true)
@@ -311,7 +324,7 @@ public actor GooglePhotosImporter: GooglePhotosImporting {
         let outcome = try await pipeline.scan(
             PhotoScanImage(image: image, orientation: .up),
             timestamp: photo.createTime?.timeIntervalSinceReferenceDate ?? 0, source: .googlePhotos,
-            sourceRef: photo.sourceRef)
+            sourceRef: photo.sourceRef, space: space)
         guard case .scanned(let result) = outcome else {
             try? cache.remove(itemID: photo.id)
             return (0, true)
@@ -325,8 +338,7 @@ public actor GooglePhotosImporter: GooglePhotosImporting {
     }
 
     /// Ids of Google items that already have embeddings in this space.
-    private func embeddedItemIDs() async throws -> Set<String> {
-        let space = embedder.space
+    private func embeddedItemIDs(space: EmbeddingSpace) async throws -> Set<String> {
         let existing =
             try await store.unassignedEmbeddings(space: space) + store.confirmedGallery(space: space)
         return Set(
@@ -334,10 +346,19 @@ public actor GooglePhotosImporter: GooglePhotosImporting {
                 .compactMap(GooglePhotosCache.itemID(fromSourceRef:)))
     }
 
-    /// Best effort, and never cancelled with the import: runs in its own task so a cancelled import
-    /// still cleans up its session at Google.
+    /// Best effort and bounded by `config.sessionCleanupTimeout`, so cancel, forget and the kill
+    /// switch never wait on a slow network. Runs in its own task so it is not cancelled together
+    /// with the import it cleans up after.
     private func deleteSession(_ id: String, client: GooglePhotosPickerClient) async {
-        await Task { try? await client.deleteSession(id: id) }.value
+        let timeout = config.sessionCleanupTimeout
+        await Task {
+            await withTaskGroup(of: Void.self) { group in
+                group.addTask { try? await client.deleteSession(id: id) }
+                group.addTask { try? await Task.sleep(for: timeout) }
+                await group.next()
+                group.cancelAll()
+            }
+        }.value
     }
 
     /// The error `importPicked` throws: cancellation stays `CancellationError`, client-internal

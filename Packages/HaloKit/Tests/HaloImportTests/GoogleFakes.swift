@@ -118,6 +118,8 @@ final class FakeGoogle: HTTPTransport, Sendable {
         var onDownload: [String: @Sendable () -> Void] = [:]
         var refreshResponse: (Int, Data)?
         var deletedSessions: [String] = []
+        /// The session DELETE hangs until its task is cancelled (a very slow network).
+        var hangDelete = false
         var createdSessions = 0
         var downloads: [String] = []
         var downloadURLs: [URL] = []
@@ -170,6 +172,7 @@ final class FakeGoogle: HTTPTransport, Sendable {
             }
             return (200, sessionJSON(set: set))
         case ("photospicker.googleapis.com", "DELETE", "/v1/sessions/s1"):
+            if with({ $0.hangDelete }) { try await Task.sleep(for: .seconds(30)) }
             with { $0.deletedSessions.append("s1") }
             return (200, Data("{}".utf8))
         case ("photospicker.googleapis.com", "GET", "/v1/mediaItems"):

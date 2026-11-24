@@ -272,7 +272,7 @@ public actor PhotoScanJob {
 
         let outcome = try await pipeline.scan(
             loaded, timestamp: asset.creationDate.timeIntervalSinceReferenceDate, source: .photoLibrary,
-            sourceRef: ref)
+            sourceRef: ref, space: space)
         let scan: FaceScanPipeline.ImageScan
         switch outcome {
         case .failed(let error):

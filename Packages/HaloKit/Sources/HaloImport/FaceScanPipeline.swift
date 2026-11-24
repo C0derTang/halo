@@ -47,10 +47,13 @@ struct FaceScanPipeline: Sendable {
 
     /// Scans one image. Throws only `CancellationError` or a systemic failure; any other error
     /// skips the image (`.failed`) or the face (counted in `facesFailed`).
+    ///
+    /// `space` is the embedder's space as the caller read it once for the whole run (the app's
+    /// embedder loads lazily); a vector that does not fit it is rejected.
     func scan(
-        _ loaded: PhotoScanImage, timestamp: TimeInterval, source: FaceEmbedding.Source, sourceRef: String
+        _ loaded: PhotoScanImage, timestamp: TimeInterval, source: FaceEmbedding.Source, sourceRef: String,
+        space: EmbeddingSpace
     ) async throws -> Outcome {
-        let space = embedder.space
         let image: CGImage
         let faces: [FaceObservation]
         do {
