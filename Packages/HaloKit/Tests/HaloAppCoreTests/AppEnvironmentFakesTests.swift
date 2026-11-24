@@ -339,7 +339,8 @@ struct EnvHarness {
         hookGenerator: any MemoryHookGenerating = UnavailableHookGenerator(),
         whisper: EnvWhisper? = nil, log: EnvEventLog = EnvEventLog(),
         authenticator: any Authenticating = EnvFakeAuthenticator(),
-        speechTranscriber: (any SpeechTranscribing)? = nil
+        speechTranscriber: (any SpeechTranscribing)? = nil,
+        googlePhotos: (any GooglePhotosImporting & EnvGooglePhotosAttaching)? = nil
     ) throws {
         let store = try EnvRecordingStore(log: log)
         let embedder = EnvFakeEmbedder()
@@ -371,7 +372,12 @@ struct EnvHarness {
             hookGenerator: hookGenerator,
             memoryRefreshInterval: 0,
             makeWhisper: { whisper?.components ?? .silent() },
-            speechTranscriber: speechTranscriber)
+            speechTranscriber: speechTranscriber,
+            makeGooglePhotos: { services in
+                guard let googlePhotos else { return NullGooglePhotosImporter() }
+                googlePhotos.attach(services)
+                return googlePhotos
+            })
         environment = AppEnvironment(dependencies: dependencies)
         self.store = store
         self.log = log

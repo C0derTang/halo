@@ -41,6 +41,9 @@ import SwiftUI
 /// - **Memory hooks** (`AppEnvironmentMemory.swift`): the refresher is a writer like the imports:
 ///   off the main actor, never during a forget / erase, cancelled and awaited by both. Labels on the
 ///   lens and the detail screen include the person's hooks and rebuild when hooks change.
+/// - **Google Photos** (`AppEnvironmentGooglePhotos.swift`): the importer is a writer like the scan.
+///   It never runs alongside the Apple Photos scan, forget cancels and awaits it, and the kill switch
+///   cancels and awaits it and erases its tokens and downloaded photos before the store erase.
 /// - **Whisper** (`AppEnvironmentWhisper.swift`): fed by the lens's overlay updates, only while
 ///   enabled, the lens runs, the app is unlocked and in the foreground; every lens stop (tab, lock,
 ///   background, kill switch) cancels speech and releases the `.playback` + `.mixWithOthers` audio
@@ -72,6 +75,10 @@ public final class AppEnvironment {
     public let policy: MatchPolicy
     /// `.halodigest` import status for the UI. Imports run through `importDigest(url:)`.
     public let digestImport: DigestImportModel
+    /// Imports photos the user picks in Google Photos (a writer: see `AppEnvironmentGooglePhotos`).
+    public let googlePhotos: any GooglePhotosImporting
+    /// "Add from Google Photos" state and actions for the People and Settings screens.
+    public let googleImport: GooglePhotosImportModel
     /// nil until the model loaded, and forever when recognition is unavailable.
     public private(set) var lensPipeline: LensPipeline?
     /// The Live Lens screen model, driving `camera`. nil until recognition is known (and without a
@@ -141,6 +148,21 @@ public final class AppEnvironment {
     @ObservationIgnored var digestTask: Task<Void, Never>?
     /// Tail of the queue of requested digest imports (they run one at a time, in order).
     @ObservationIgnored var digestQueue: Task<Bool, Never>?
+    /// The Google Photos import currently running (at most one). Owned here so forget / erase can
+    /// stop it and the Apple Photos scan waits for it.
+    @ObservationIgnored var googleTask: Task<GooglePhotosImportProgress, any Error>?
+    /// A Google import was asked for and is waiting (model load, a forget) before its task exists.
+    @ObservationIgnored var googleRunPending = false
+    /// Cancel was tapped while `googleRunPending`: the run does not start.
+    @ObservationIgnored var googleCancelRequested = false
+    /// The running Google import was cancelled because the phone locked.
+    @ObservationIgnored var googlePausedForLock = false
+    /// Device lock signal for the Google import, kept for the app's lifetime.
+    @ObservationIgnored private var protectedDataObserver: ProtectedDataObserver?
+    /// The kill switch's `googlePhotos.eraseAll()` failed; retried after the store erase.
+    @ObservationIgnored var googleEraseFailed = false
+    /// The embedder handed to the Google Photos importer, filled in once the model has loaded.
+    @ObservationIgnored let googleEmbedder: DeferredFaceEmbedder
     /// Bumped by every kill switch that SUCCEEDED (before waiting imports may resume). An import
     /// or scan resume requested before it is dropped, never run afterwards; a failed erase drops
     /// nothing.
@@ -173,8 +195,20 @@ public final class AppEnvironment {
         self.store = store
         appLock = AppLock(authenticator: dependencies.authenticator, timeout: dependencies.lockTimeout)
         privacy = PrivacySettingsViewModel(store: store, authenticator: dependencies.authenticator)
-        enrollment = EnrollmentViewModel(store: store, thumbnails: dependencies.thumbnails)
-        thumbnails = dependencies.thumbnails
+        let googleEmbedder = DeferredFaceEmbedder()
+        self.googleEmbedder = googleEmbedder
+        // Same store, detector and (once loaded) embedder as the Apple Photos scan; writes stop at
+        // the first one after the import's task is cancelled.
+        let googlePhotos = dependencies.makeGooglePhotos(
+            GooglePhotosServices(
+                config: dependencies.googlePhotosConfig, store: CancellableImportStore(base: lazyStore),
+                detector: dependencies.detector, embedder: googleEmbedder))
+        self.googlePhotos = googlePhotos
+        googleImport = GooglePhotosImportModel(importer: googlePhotos)
+        let thumbnails = SourceRoutedThumbnails(
+            photoLibrary: dependencies.thumbnails, googlePhotos: googlePhotos)
+        self.thumbnails = thumbnails
+        enrollment = EnrollmentViewModel(store: store, thumbnails: thumbnails)
         policy = dependencies.policy
 
         let normalizer = HandleNormalizer(region: dependencies.region ?? "ZZ")
@@ -209,7 +243,13 @@ public final class AppEnvironment {
 
         isStoreAvailable = lazyStore.openIfNeeded()
         store.setDelegate(self)
+        googleImport.driver = self
+        protectedDataObserver = ProtectedDataObserver { [weak self] in
+            Task { await self?.protectedDataWillBecomeUnavailable() }
+        }
         observeAppLock()
+        let googleImport = self.googleImport
+        Task { await googleImport.refreshSignInState() }
     }
 
     /// Stops the lens whenever the app locks and restarts it (if on screen) once unlocked: nothing
@@ -289,6 +329,7 @@ public final class AppEnvironment {
             await self?.galleryApplied(matcher)
         }
         self.embedder = embedder
+        googleEmbedder.resolve(embedder)
         self.refresher = refresher
         embeddingSpace = embedder.space
         lensPipeline = pipeline
@@ -435,11 +476,11 @@ public final class AppEnvironment {
         reconcileScan()
     }
 
-    /// Starts the scan when it is wanted and nothing forbids it (no model yet, backgrounded, or a
-    /// forget / erase in progress).
-    private func reconcileScan() {
+    /// Starts the scan when it is wanted and nothing forbids it (no model yet, backgrounded, a
+    /// forget / erase in progress, or a Google Photos import running).
+    func reconcileScan() {
         guard wantsScan, scanTask == nil, destructiveOperations == 0, phase != .background,
-            let embedder
+            googleTask == nil, let embedder
         else { return }
         let job = PhotoScanJob(
             source: dependencies.photoLibrary, detector: dependencies.detector, embedder: embedder,
@@ -588,6 +629,8 @@ extension AppEnvironment: ObservedStoreDelegate {
         await stopMemoryRefresh()
         // Let running imports finish their writes (new ones wait for this forget).
         await stopImports(cancel: false)
+        // A Google import can sit in the picker for a long time: cancel it (it keeps what it saved).
+        await stopGooglePhotosImport(eraseData: false)
         // Recognition-log writes the lens already issued land before the delete.
         await lens?.settle()
     }
@@ -618,6 +661,8 @@ extension AppEnvironment: ObservedStoreDelegate {
         await pauseScan()
         await stopMemoryRefresh()
         await stopImports(cancel: true)
+        // Cancel and await the Google import; delete its tokens and downloaded photos.
+        await stopGooglePhotosImport(eraseData: true)
         await lens?.settle()
         finishScanObservers()
     }
@@ -634,9 +679,12 @@ extension AppEnvironment: ObservedStoreDelegate {
             await refresher?.reset()
             scanProgress = nil
             scanStatus = recognition == .unavailable ? .unavailable : .idle
-            enrollment = EnrollmentViewModel(store: store, thumbnails: dependencies.thumbnails)
+            enrollment = EnrollmentViewModel(store: store, thumbnails: thumbnails)
             // "Erase all Halo data" includes the Whisper toggles and trusted Bluetooth devices.
             eraseWhisperData()
+            // ...and Google sign-in and downloaded photos (retried here if it failed before).
+            if googleEraseFailed { await eraseGooglePhotosData() }
+            googleImport.reset()
             resetGeneration += 1
         } else {
             await refresher?.requestRefresh()

@@ -53,6 +53,11 @@ public struct AppDependencies: Sendable {
     public var makeWhisper: @MainActor @Sendable () -> WhisperComponents
     /// Moments dictation, ON DEVICE ONLY (`OnDeviceSpeechTranscriber` in the app). nil hides it.
     public var speechTranscriber: (any SpeechTranscribing)?
+    /// This build's Google OAuth client ID (Info.plist `HaloGoogleClientID`); empty = not configured.
+    public var googlePhotosConfig: GooglePhotosConfig
+    /// Builds the Google Photos importer (called once, at init) over the app's own store, detector
+    /// and embedder. The default imports nothing.
+    public var makeGooglePhotos: @Sendable (GooglePhotosServices) -> any GooglePhotosImporting
 
     public init(
         openStore: @escaping @Sendable () throws -> any AppStoring,
@@ -78,7 +83,11 @@ public struct AppDependencies: Sendable {
         hookGenerator: any MemoryHookGenerating = UnavailableHookGenerator(),
         memoryRefreshInterval: TimeInterval = MemoryHookRefresher.defaultMinimumInterval,
         makeWhisper: @escaping @MainActor @Sendable () -> WhisperComponents = { .silent() },
-        speechTranscriber: (any SpeechTranscribing)? = nil
+        speechTranscriber: (any SpeechTranscribing)? = nil,
+        googlePhotosConfig: GooglePhotosConfig = .notConfigured,
+        makeGooglePhotos: @escaping @Sendable (GooglePhotosServices) -> any GooglePhotosImporting = { _ in
+            NullGooglePhotosImporter()
+        }
     ) {
         self.openStore = openStore
         self.loadEmbedder = loadEmbedder
@@ -102,6 +111,8 @@ public struct AppDependencies: Sendable {
         self.memoryRefreshInterval = memoryRefreshInterval
         self.makeWhisper = makeWhisper
         self.speechTranscriber = speechTranscriber
+        self.googlePhotosConfig = googlePhotosConfig
+        self.makeGooglePhotos = makeGooglePhotos
     }
 }
 
@@ -109,7 +120,8 @@ extension AppDependencies {
     /// The real services: `PeopleStore` at its default (Data Protection `.complete`) path, the
     /// bundled CoreML embedder, Vision detection, PhotoKit, Contacts, Face ID, the Keychain pairing
     /// key, the system permission prompts, the back camera, the on-device Foundation Models hook
-    /// generator, the system Whisper components and on-device Moments dictation.
+    /// generator, the system Whisper components, on-device Moments dictation and the Google Photos
+    /// importer (configured from the bundle's `HaloGoogleClientID`).
     @MainActor
     public static func live() -> AppDependencies {
         AppDependencies(
@@ -133,7 +145,16 @@ extension AppDependencies {
             backgroundWork: LifecycleBackgroundWork.run,
             hookGenerator: liveHookGenerator(),
             makeWhisper: { .system() },
-            speechTranscriber: OnDeviceSpeechTranscriber())
+            speechTranscriber: OnDeviceSpeechTranscriber(),
+            googlePhotosConfig: .fromBundle(.main),
+            makeGooglePhotos: liveGooglePhotos)
+    }
+
+    /// The Google Photos importer. MASTER REPLACES this body with the HaloImport importer once it
+    /// has merged (wave 6); `services` carries everything it is built from (config, store, detector,
+    /// embedder, clusterer), so the swap is one line. Until then nothing is imported.
+    static func liveGooglePhotos(_ services: GooglePhotosServices) -> any GooglePhotosImporting {
+        NullGooglePhotosImporter()
     }
 
     private static func liveHookGenerator() -> any MemoryHookGenerating {

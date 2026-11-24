@@ -3,8 +3,9 @@ import HaloCore
 import HaloUI
 import SwiftUI
 
-/// People tab: confirmed people, person detail, and the "Who is this?" triage entry. Models come
-/// from the environment, so they share its store, normalizer, ranker and forget path.
+/// People tab: confirmed people, person detail, the "Who is this?" triage entry and "Add from
+/// Google Photos" (when this build has a Google client ID). Models come from the environment, so
+/// they share its store, normalizer, ranker and forget path.
 struct PeopleTab: View {
     let environment: AppEnvironment
     @State private var list: PeopleListModel
@@ -20,6 +21,14 @@ struct PeopleTab: View {
         } triage: {
             EnrollmentTriageView(model: environment.enrollment)
                 .navigationTitle("Who is this?")
+        } accessory: {
+            // On the root list only. Imported faces land in "Who is this?" as suggestions (the
+            // import bumps `peopleRevision`).
+            if environment.googleImport.isConfigured {
+                Section("Add photos") {
+                    GooglePhotosImportControls(model: environment.googleImport)
+                }
+            }
         }
         // Confirm, forget, edits, imports: reload the list.
         .onChange(of: environment.peopleRevision) {

@@ -2,23 +2,28 @@ import HaloCore
 import SwiftUI
 
 /// People tab root. `triage` builds the enrollment screen the "Needs review" row links to.
-public struct PeopleListView<Detail: View, Triage: View>: View {
+/// `accessory` (list rows or sections, e.g. an import entry) is shown at the top of the root list
+/// only, never on pushed screens.
+public struct PeopleListView<Detail: View, Triage: View, Accessory: View>: View {
     @Bindable var model: PeopleListModel
     let detail: (PersonID) -> Detail
     let triage: () -> Triage
+    let accessory: () -> Accessory
 
     public init(
         model: PeopleListModel, @ViewBuilder detail: @escaping (PersonID) -> Detail,
-        @ViewBuilder triage: @escaping () -> Triage
+        @ViewBuilder triage: @escaping () -> Triage, @ViewBuilder accessory: @escaping () -> Accessory
     ) {
         self.model = model
         self.detail = detail
         self.triage = triage
+        self.accessory = accessory
     }
 
     public var body: some View {
         NavigationStack {
             List {
+                accessory()
                 if model.needsReviewCount > 0 {
                     Section("Needs review") {
                         NavigationLink {
@@ -63,6 +68,15 @@ public struct PeopleListView<Detail: View, Triage: View>: View {
             }
             .task { await model.load() }
         }
+    }
+}
+
+extension PeopleListView where Accessory == EmptyView {
+    public init(
+        model: PeopleListModel, @ViewBuilder detail: @escaping (PersonID) -> Detail,
+        @ViewBuilder triage: @escaping () -> Triage
+    ) {
+        self.init(model: model, detail: detail, triage: triage) { EmptyView() }
     }
 }
 
