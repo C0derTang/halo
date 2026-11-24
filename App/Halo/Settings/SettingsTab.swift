@@ -2,8 +2,8 @@ import HaloAppCore
 import HaloUI
 import SwiftUI
 
-/// Settings tab: Mac bridge (pairing, digest import), data sources (contacts, photo scan), then the
-/// privacy screen (people, recognition history, forget, erase everything). Wiring only.
+/// Settings tab: Mac bridge (pairing, digest import), data sources (contacts, photo scan, Google
+/// Photos), then the privacy screen (people, recognition history, forget, erase everything). Wiring only.
 struct SettingsTab: View {
     let environment: AppEnvironment
     let importDigest: (URL) -> Void
@@ -43,6 +43,7 @@ struct SettingsTab: View {
                 .disabled(!canScan)
                 LabeledContent("Photo scan", value: scanText)
             }
+            GooglePhotosSection(model: environment.googleImport)
             Section {
                 Toggle("Whisper names", isOn: whisperBinding(\.isEnabled))
                 Toggle("Also say one detail", isOn: whisperBinding(\.speaksChip))
