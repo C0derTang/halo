@@ -55,7 +55,9 @@ public actor GooglePhotosImporter: GooglePhotosImporting {
     private let tokenStore: any GoogleTokenStoring
     private let cache: GooglePhotosCache
     private let store: any PeopleStoring & EnrollmentStoring
-    private let space: EmbeddingSpace
+    /// `space` is read per import, never here: the app's lazily loading embedder only knows its
+    /// space once the model has loaded.
+    private let embedder: any FaceEmbedder
     private let pipeline: FaceScanPipeline
     private let refresher: ClusterSuggestionRefresher
     private let config: GooglePhotosImportConfig
@@ -102,7 +104,7 @@ public actor GooglePhotosImporter: GooglePhotosImporting {
                 path: "GooglePhotos", directoryHint: .isDirectory)
         cache = GooglePhotosCache(directory: directory, maxPixelSize: config.downloadPixelSize)
         self.store = store
-        space = embedder.space
+        self.embedder = embedder
         pipeline = FaceScanPipeline(
             detector: detector, embedder: embedder, uprighter: uprighter, config: config.scan,
             isSystemicFailure: isSystemicFailure)
@@ -263,7 +265,7 @@ public actor GooglePhotosImporter: GooglePhotosImporting {
 
             publish(.clustering)
             _ = try await refresher.refreshRetrying(
-                space: space, full: true, attempts: config.scan.clusteringAttempts)
+                space: embedder.space, full: true, attempts: config.scan.clusteringAttempts)
             publish(.finished)
             return state
         } catch {
@@ -324,6 +326,7 @@ public actor GooglePhotosImporter: GooglePhotosImporting {
 
     /// Ids of Google items that already have embeddings in this space.
     private func embeddedItemIDs() async throws -> Set<String> {
+        let space = embedder.space
         let existing =
             try await store.unassignedEmbeddings(space: space) + store.confirmedGallery(space: space)
         return Set(

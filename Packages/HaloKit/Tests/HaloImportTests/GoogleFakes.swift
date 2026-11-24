@@ -292,6 +292,19 @@ final class FakeClock: GoogleImportClock, Sendable {
     }
 }
 
+/// An embedder whose `space` is a placeholder until `load()`, like the app's lazy model wrapper.
+final class LazySpaceEmbedder: FaceEmbedder, Sendable {
+    private let inner = SyntheticEmbedder()
+    private let loaded = Mutex(false)
+    var space: EmbeddingSpace {
+        loaded.withLock { $0 } ? inner.space : EmbeddingSpace(modelID: "placeholder", dimension: 0)
+    }
+    func load() { loaded.withLock { $0 = true } }
+    func embed(face: FaceObservation, in image: CGImage) async throws -> [Float] {
+        try await inner.embed(face: face, in: image)
+    }
+}
+
 /// Fixed-access-token provider for client tests; records refresh requests.
 final class StaticTokens: GoogleAccessTokenProviding, Sendable {
     let refreshes = Recorder<Bool>()

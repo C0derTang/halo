@@ -114,6 +114,26 @@ private func downloadStarted(_ google: FakeGoogle, id: String, hang: Bool) -> As
         #expect(await h.importer.isSignedIn())
     }
 
+    @Test func embeddingSpaceIsReadAtImportTimeNotInInit() async throws {
+        // Like the app's lazily loading embedder: a placeholder space until the model loads.
+        let lazy = LazySpaceEmbedder()
+        let store = PhotoScanFakeStore()
+        let google = FakeGoogle(items: [photo(0)])
+        let (tokenStore, _) = G.tokenStore()
+        let dir = G.tempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let importer = GooglePhotosImporter(
+            clientID: G.clientID, store: store, detector: ScriptedDetector(facesByWidth: standardFaces),
+            embedder: lazy, clusterer: FaceClusterer(), presenter: FakePresenter(), transport: google,
+            tokenStore: tokenStore, cacheDirectory: dir,
+            config: GooglePhotosImportConfig(scan: PhotoScanConfig(maxPixelSize: 2048)), clock: FakeClock(),
+            now: { G.now })
+        lazy.load()
+        let result = try await importer.importPicked { _ in }
+        #expect(result.facesEmbedded == 1)
+        #expect(await store.embeddings.map(\.space) == [SyntheticEmbedder().space])
+    }
+
     @Test func nothingIsUploadedAndOnlyGoogleIsContacted() async throws {
         let h = Harness(items: standardItems, faces: standardFaces)
         defer { h.cleanUp() }
