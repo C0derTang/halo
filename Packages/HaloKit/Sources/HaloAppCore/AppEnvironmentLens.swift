@@ -17,6 +17,30 @@ import Synchronization
     }
 #endif
 
+/// A person the lens currently shows a name for: a confirmed, known person (invariants 1 + 3).
+/// Unknown and ambiguous faces never appear here.
+public struct LensRecognizedPerson: Hashable, Sendable, Identifiable {
+    public let id: PersonID
+    public let displayName: String
+
+    public init(id: PersonID, displayName: String) {
+        self.id = id
+        self.displayName = displayName
+    }
+}
+
+extension AppEnvironment {
+    /// The people labeled on the lens right now, in on-screen order (who a Moment can be about).
+    /// Empty while the lens is stopped.
+    public var recognizedPeople: [LensRecognizedPerson] {
+        var seen: Set<PersonID> = []
+        return (lens?.items ?? []).compactMap { item in
+            guard let label = item.label, seen.insert(label.personID).inserted else { return nil }
+            return LensRecognizedPerson(id: label.personID, displayName: label.title)
+        }
+    }
+}
+
 /// The store as the lens's label builder sees it: `identities(for:)` returns the STORE-WIDE
 /// identity set. `ContextLabelRanker` attributes a digest entry only to the handles of the person
 /// it labels, and uses everyone else's handles to drop a handle two people share (its ambiguity

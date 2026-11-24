@@ -31,24 +31,28 @@ public final class PersonDetailModel {
     @ObservationIgnored private let store: any PeopleStoring & PrivacyStoring
     @ObservationIgnored private let thumbnails: any FaceThumbnailProvider
     @ObservationIgnored private let ranker: any LabelRanking
+    @ObservationIgnored private let hooks: @Sendable (PersonID, Date) async -> [MemoryHook]
     @ObservationIgnored private let space: EmbeddingSpace
     @ObservationIgnored private let now: @Sendable () -> Date
     @ObservationIgnored private let forgetAction: @Sendable (Person) async -> Bool
 
     /// - Parameters:
     ///   - ranker: the same `LabelRanking` instance the lens uses.
+    ///   - hooks: the person's unexpired memory hooks, read as the lens reads them (none by default).
     ///   - forget: the single forget path, i.e. `PrivacySettingsViewModel.confirmForget(_:)`.
     ///     This model never calls `store.forget` itself.
     public init(
         personID: PersonID, store: any PeopleStoring & PrivacyStoring,
         thumbnails: any FaceThumbnailProvider, ranker: any LabelRanking, space: EmbeddingSpace,
         now: @escaping @Sendable () -> Date = { Date() },
+        hooks: @escaping @Sendable (PersonID, Date) async -> [MemoryHook] = { _, _ in [] },
         forget: @escaping @Sendable (Person) async -> Bool
     ) {
         self.personID = personID
         self.store = store
         self.thumbnails = thumbnails
         self.ranker = ranker
+        self.hooks = hooks
         self.space = space
         self.now = now
         self.forgetAction = forget
@@ -72,8 +76,10 @@ public final class PersonDetailModel {
             for other in try await store.allPeople() {
                 allIdentities += try await store.identities(for: other.id)
             }
+            let date = now()
+            let personHooks = await hooks(personID, date)
             labelPreview = ranker.label(
-                for: person, identities: allIdentities, digest: digest, now: now())
+                for: person, identities: allIdentities, digest: digest, hooks: personHooks, now: date)
             faceCount = gallery.count
             var thumbs: [PersonFace] = []
             for embedding in gallery.prefix(Self.maxThumbnails) {

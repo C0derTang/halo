@@ -11,7 +11,8 @@ extension AppEnvironment {
         return PeopleListModel(store: store, normalize: { normalizer.normalize($0) })
     }
 
-    /// Person detail. Its label preview uses the lens's ranker; "Forget" goes through the single
+    /// Person detail. Its label preview uses the lens's ranker and the person's memory hooks, like
+    /// the lens; "Forget" goes through the single
     /// forget path, `PrivacySettingsViewModel.confirmForget(_:)` -> `store.forget` (writers stopped,
     /// lens gallery and label cleared).
     public func makePersonDetailModel(for id: PersonID) -> PersonDetailModel {
@@ -19,6 +20,7 @@ extension AppEnvironment {
         return PersonDetailModel(
             personID: id, store: store, thumbnails: thumbnails, ranker: labelRanker,
             space: embeddingSpace ?? Self.placeholderSpace,
+            hooks: Self.hookReader(store),
             forget: { person in await privacy.confirmForget(person) })
     }
 

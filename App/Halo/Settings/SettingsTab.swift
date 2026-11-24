@@ -43,11 +43,36 @@ struct SettingsTab: View {
                 .disabled(!canScan)
                 LabeledContent("Photo scan", value: scanText)
             }
+            Section {
+                Toggle("Whisper names", isOn: whisperBinding(\.isEnabled))
+                Toggle("Also say one detail", isOn: whisperBinding(\.speaksChip))
+                    .disabled(!environment.whisperSettings.isEnabled)
+                if let device = environment.whisperDevicePrompt {
+                    Button("Use \(device.name) for Whisper") { environment.confirmWhisperDevice(true) }
+                }
+            } header: {
+                Text("Whisper")
+            } footer: {
+                Text(
+                    "Quietly says who's in view through your headphones, never the speaker. Bluetooth devices need your OK once. Off while Halo is locked or in the background."
+                )
+            }
         }
         .sheet(isPresented: $pickingDigest) {
             DigestDocumentPicker { url in importDigest(url) }
                 .ignoresSafeArea()
         }
+    }
+
+    /// One Whisper toggle, applied through the environment (persists; turning off stops speech).
+    private func whisperBinding(_ keyPath: WritableKeyPath<WhisperSettings, Bool>) -> Binding<Bool> {
+        Binding(
+            get: { environment.whisperSettings[keyPath: keyPath] },
+            set: { value in
+                var settings = environment.whisperSettings
+                settings[keyPath: keyPath] = value
+                environment.setWhisperSettings(settings)
+            })
     }
 
     private var canScan: Bool {

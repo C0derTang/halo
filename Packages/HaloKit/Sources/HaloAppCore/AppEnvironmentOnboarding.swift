@@ -89,13 +89,15 @@ extension AppEnvironment {
     /// - a scan has run before: the store has a scan cursor. The kill switch deletes the cursor, so
     ///   an erase is never undone by rescanning the library on the next launch; after it, only an
     ///   explicit "Scan photos" starts a scan again;
-    /// - no forget / erase is in flight.
+    /// - no forget / erase is in flight, and no kill switch completed since before the cursor was
+    ///   read (a cursor read just before an erase must not restart the scan after it).
     func resumePhotoScanIfConsented() async {
+        let requestedIn = eraseGeneration
         guard dependencies.onboarding.isCompleted, recognition != .unavailable else { return }
         guard await dependencies.permissions.status(for: .photos).allowsUse else { return }
         // `try?` flattens: nil when unreadable or when there is no cursor.
         guard (try? await store.scanCursor()) != nil else { return }
-        guard destructiveOperations == 0 else { return }
+        guard destructiveOperations == 0, eraseGeneration == requestedIn else { return }
         startPhotoScan()
     }
 }

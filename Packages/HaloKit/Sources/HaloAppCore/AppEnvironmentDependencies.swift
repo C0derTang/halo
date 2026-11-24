@@ -4,6 +4,7 @@ import HaloBridgeKit
 import HaloCore
 import HaloImport
 import HaloLens
+import HaloMemory
 import HaloStore
 import HaloUI
 import HaloVision
@@ -42,6 +43,16 @@ public struct AppDependencies: Sendable {
     /// Runs lifecycle work that must finish after backgrounding (store flush). On iOS this holds a
     /// `UIApplication` background task for the duration.
     public var backgroundWork: @MainActor @Sendable (String, @MainActor () async -> Void) async -> Void
+    /// The ON-DEVICE memory hook generator (Foundation Models in the app). Invariant 6: never an
+    /// off-device model. The default generates nothing.
+    public var hookGenerator: any MemoryHookGenerating
+    /// Minimum time between two completed memory hook refreshes.
+    public var memoryRefreshInterval: TimeInterval
+    /// Builds Whisper mode's route reader, trusted-device store, speech, haptics, audio session and
+    /// settings store (called once, at init). The default never speaks.
+    public var makeWhisper: @MainActor @Sendable () -> WhisperComponents
+    /// Moments dictation, ON DEVICE ONLY (`OnDeviceSpeechTranscriber` in the app). nil hides it.
+    public var speechTranscriber: (any SpeechTranscribing)?
 
     public init(
         openStore: @escaping @Sendable () throws -> any AppStoring,
@@ -63,7 +74,11 @@ public struct AppDependencies: Sendable {
         makeCamera: @escaping @MainActor @Sendable () -> (any CameraControlling)? = { nil },
         backgroundWork: @escaping @MainActor @Sendable (String, @MainActor () async -> Void) async -> Void = {
             _, work in await work()
-        }
+        },
+        hookGenerator: any MemoryHookGenerating = UnavailableHookGenerator(),
+        memoryRefreshInterval: TimeInterval = MemoryHookRefresher.defaultMinimumInterval,
+        makeWhisper: @escaping @MainActor @Sendable () -> WhisperComponents = { .silent() },
+        speechTranscriber: (any SpeechTranscribing)? = nil
     ) {
         self.openStore = openStore
         self.loadEmbedder = loadEmbedder
@@ -83,13 +98,18 @@ public struct AppDependencies: Sendable {
         self.galleryDebounce = galleryDebounce
         self.makeCamera = makeCamera
         self.backgroundWork = backgroundWork
+        self.hookGenerator = hookGenerator
+        self.memoryRefreshInterval = memoryRefreshInterval
+        self.makeWhisper = makeWhisper
+        self.speechTranscriber = speechTranscriber
     }
 }
 
 extension AppDependencies {
     /// The real services: `PeopleStore` at its default (Data Protection `.complete`) path, the
     /// bundled CoreML embedder, Vision detection, PhotoKit, Contacts, Face ID, the Keychain pairing
-    /// key, the system permission prompts, the back camera.
+    /// key, the system permission prompts, the back camera, the on-device Foundation Models hook
+    /// generator, the system Whisper components and on-device Moments dictation.
     @MainActor
     public static func live() -> AppDependencies {
         AppDependencies(
@@ -110,7 +130,18 @@ extension AppDependencies {
             onboarding: UserDefaultsOnboardingStore(),
             region: Locale.current.region?.identifier,
             makeCamera: liveCamera,
-            backgroundWork: LifecycleBackgroundWork.run)
+            backgroundWork: LifecycleBackgroundWork.run,
+            hookGenerator: liveHookGenerator(),
+            makeWhisper: { .system() },
+            speechTranscriber: OnDeviceSpeechTranscriber())
+    }
+
+    private static func liveHookGenerator() -> any MemoryHookGenerating {
+        #if canImport(FoundationModels)
+            FoundationModelsHookGenerator()
+        #else
+            UnavailableHookGenerator()
+        #endif
     }
 
     private static func livePhotoLibrary() -> any PhotoLibrarySource {

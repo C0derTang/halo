@@ -10,7 +10,7 @@ extension AppEnvironment {
     /// - the kill switch cancels it and waits for it, so no write lands after the erase;
     /// - while a forget runs, a new import waits until it has finished;
     /// - an import requested before a kill switch that has not started writing when the erase
-    ///   begins is dropped (throws `CancellationError`), never run after the erase.
+    ///   begins is dropped (throws `CancellationError`) if the erase succeeded, never run after it.
     ///
     /// A second call while one is running joins it instead of importing twice.
     public func importContacts() async throws -> ContactsImportResult {
@@ -35,8 +35,8 @@ extension AppEnvironment {
     /// Requests are queued and run one at a time, in order. Each one, when its turn comes:
     /// - waits for a running forget / erase to finish (this wait is not a writer, so a forget /
     ///   erase never waits on it);
-    /// - is dropped (its app-owned file deleted, nothing saved) if a kill switch began after it was
-    ///   requested;
+    /// - is dropped (its app-owned file deleted, nothing saved) if a kill switch that succeeded ran
+    ///   after it was requested (a failed erase drops nothing);
     /// - otherwise registers its writer as `digestTask` with no suspension after those checks, so a
     ///   forget awaits it and a kill switch cancels and awaits it.
     ///
@@ -63,6 +63,8 @@ extension AppEnvironment {
                 // `saveDigest` went through `store`, which already scheduled the gallery rebuild
                 // and bumped `peopleRevision` (People screens reload). Rebuild on-screen labels now.
                 self.lens?.refreshLabels()
+                // New excerpts: regenerate memory hooks (off the main actor, rate-limited).
+                self.refreshMemoryHooks()
             }
             return true
         }

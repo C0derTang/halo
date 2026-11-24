@@ -47,6 +47,8 @@ public protocol AudioRouteChecking: Sendable {
 public protocol TrustedAudioDeviceStore: AnyObject {
     func isTrusted(_ portUID: String) -> Bool
     func trust(_ portUID: String)
+    /// Forgets every confirmed device (the kill switch).
+    func removeAll()
 }
 
 public final class InMemoryTrustedAudioDeviceStore: TrustedAudioDeviceStore {
@@ -54,6 +56,7 @@ public final class InMemoryTrustedAudioDeviceStore: TrustedAudioDeviceStore {
     public init(_ uids: Set<String> = []) { self.uids = uids }
     public func isTrusted(_ portUID: String) -> Bool { uids.contains(portUID) }
     public func trust(_ portUID: String) { uids.insert(portUID) }
+    public func removeAll() { uids.removeAll() }
 }
 
 public enum WhisperSpeechResult: Sendable {
@@ -176,6 +179,18 @@ public final class WhisperAnnouncer {
         guard let device = pendingDeviceConfirmation else { return }
         dismissedDevices.insert(device.portUID)
         pendingDeviceConfirmation = nil
+    }
+
+    /// Whisper stopped running (off, lens stopped, Moment open): withdraw the device question
+    /// without recording an answer. It is asked again the next time the route is evaluated.
+    public func clearPendingDevice() {
+        if pendingDeviceConfirmation != nil { pendingDeviceConfirmation = nil }
+    }
+
+    /// Cancels queued and playing speech without starting a new session: cancelled people are
+    /// announced later, people already heard are not repeated.
+    public func cancelSpeech() {
+        cancelAll()
     }
 
     /// Start of a new lens session: everyone may be announced again.
