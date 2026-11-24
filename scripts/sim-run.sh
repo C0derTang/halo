@@ -48,14 +48,14 @@ fi
 # --- Pick the simulator ----------------------------------------------------------------------
 udid_for() {  # $1: exact name or UDID -> UDID of an available device (newest runtime wins)
   if [[ "$1" =~ ^[0-9A-Fa-f-]{36}$ ]]; then
-    xcrun simctl list devices available | grep -Fio -- "$1" | head -1
+    xcrun simctl list devices available | grep -Fio -- "$1" | head -1 || true
     return
   fi
   # Exact name followed by " (", so "iPhone 17" never matches "iPhone 17 Pro". Runtimes are
   # listed oldest first: take the last match.
   xcrun simctl list devices available \
     | awk -v name="$1" '{ line = $0; sub(/^ +/, "", line); if (index(line, name " (") == 1) print line }' \
-    | grep -Eo '\([0-9A-F-]{36}\)' | tail -1 | tr -d '()'
+    | grep -Eo '\([0-9A-F-]{36}\)' | tail -1 | tr -d '()' || true
 }
 if [ -n "${HALO_SIM_DEVICE:-}" ]; then
   UDID="$(udid_for "$HALO_SIM_DEVICE")"
