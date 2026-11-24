@@ -7,15 +7,29 @@ import Synchronization
     import AVFoundation
 #endif
 
-#if os(iOS)
-    extension AppEnvironment {
-        /// The capture session of the app's one camera, for the lens preview layer. nil when there
-        /// is no camera.
-        public var captureSession: AVCaptureSession? {
-            (camera as? LensCameraSource)?.session
-        }
+/// What the lens draws behind the overlay. Every case fills the view with `.resizeAspectFill` of
+/// the upright frame, the gravity `LensOverlayGeometry` maps face boxes with.
+public enum LensPreview {
+    #if os(iOS)
+        /// The real camera: attach an `AVCaptureVideoPreviewLayer` to this session.
+        case session(AVCaptureSession)
+    #endif
+    /// Decoded frames (the Simulator demo camera).
+    case frames(LensPreviewFeed)
+    /// No picture (the Simulator without a demo video); the lens shows a banner instead.
+    case none
+}
+
+extension AppEnvironment {
+    /// The preview of the app's one camera. `.none` when there is no camera to show.
+    public var lensPreview: LensPreview {
+        #if os(iOS)
+            if let camera = camera as? LensCameraSource { return .session(camera.session) }
+        #endif
+        if let camera = camera as? VideoFileCamera { return .frames(camera.preview) }
+        return .none
     }
-#endif
+}
 
 /// A person the lens currently shows a name for: a confirmed, known person (invariants 1 + 3).
 /// Unknown and ambiguous faces never appear here.

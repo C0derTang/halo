@@ -8,9 +8,9 @@ struct LensTab: View {
     let isEnabled: Bool
 
     var body: some View {
-        if isEnabled, let model = environment.lens, let session = environment.captureSession {
+        if isEnabled, let model = environment.lens {
             LensScreen(
-                model: model, session: session,
+                model: model, preview: environment.lensPreview,
                 momentsAllowed: environment.momentsAllowed,
                 makeMomentsModel: { environment.makeMomentsModel() },
                 onMomentOpened: { environment.momentSheetOpened($0) },

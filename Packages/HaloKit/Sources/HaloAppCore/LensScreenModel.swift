@@ -74,6 +74,8 @@ public final class LensScreenModel {
     @ObservationIgnored private var forgotten: Set<PersonID> = []
     @ObservationIgnored private var pending: [Int: Task<Void, Never>] = [:]
     @ObservationIgnored private var nextPendingID = 0
+    /// Bumped per `start()`, so a camera failure from an earlier session is ignored.
+    @ObservationIgnored private var sessionID = 0
 
     public convenience init(
         pipeline: LensPipeline, camera: any CameraControlling, store: any PeopleStoring & PrivacyStoring,
@@ -116,6 +118,10 @@ public final class LensScreenModel {
         loggedThisSession = []
         resetLabels()
         subscribeIfNeeded()
+        sessionID += 1
+        if let reporting = camera as? any CameraFailureReporting {
+            reporting.setFailureHandler(makeFailureHandler(session: sessionID))
+        }
         if recognitionAvailable { camera.setFrameHandler(makeFrameHandler()) }
         do {
             try await camera.start()
@@ -319,6 +325,21 @@ public final class LensScreenModel {
         }
     }
 
+    /// Runs on the camera's queue when it stopped on its own (the demo video became unreadable):
+    /// end this session on the main actor and show why.
+    private func makeFailureHandler(session: Int) -> @Sendable (any Error) -> Void {
+        { [weak self] error in
+            let message = Self.message(for: error)
+            Task { @MainActor [weak self] in self?.cameraFailed(message: message, session: session) }
+        }
+    }
+
+    func cameraFailed(message: String, session: Int) {
+        guard isRunning, session == sessionID else { return }
+        stop()
+        cameraError = message
+    }
+
     // MARK: - Helpers
 
     private func spawn(_ work: @escaping @MainActor () async -> Void) {
@@ -340,7 +361,8 @@ public final class LensScreenModel {
         }
     }
 
-    private static func message(for error: any Error) -> String {
+    nonisolated static func message(for error: any Error) -> String {
+        if let error = error as? any LensCameraUserMessage { return error.userMessage }
         #if os(iOS)
             if let cameraError = error as? CameraSourceError {
                 switch cameraError {
