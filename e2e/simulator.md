@@ -21,7 +21,9 @@ copies it into its store. Never commit clips, photos or the face model (the repo
   iPhone clip works too: its rotation is applied.
 - Pick 5–10 photos of the same people (different days and angles), so the Photos scan has faces to
   cluster.
-- Keep them outside the repo, e.g. in `~/Movies/halo-demo/`.
+- Keep them outside the repo, in `~/Movies/halo-demo/`. Avoid the privacy-protected Mac folders
+  (Desktop, Documents, Downloads, iCloud Drive): macOS may not let the Simulator read files there,
+  and the lens then shows "The demo video ... could not be read" or "Demo video not found".
 
 ## 2. Run the script
 

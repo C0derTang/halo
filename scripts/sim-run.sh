@@ -12,27 +12,30 @@
 #
 # Walkthrough: e2e/simulator.md.
 set -euo pipefail
-cd "$(dirname "$0")/.."
 
 BUNDLE_ID="study.paradigm.halo"
-DERIVED="${HALO_SIM_DERIVED:-.build/sim-derived}"
-APP="$DERIVED/Build/Products/Debug-iphonesimulator/Halo.app"
 
 GRANT=0
 if [ "${1:-}" = "--grant" ]; then GRANT=1; shift; fi
 VIDEO="${1:-}"
 [ $# -gt 0 ] && shift
-PHOTOS=("$@")
 
 abspath() { (cd "$(dirname "$1")" && printf '%s/%s\n' "$(pwd -P)" "$(basename "$1")"); }
 
+# Resolve every path against the caller's directory before moving to the repo root.
 if [ -n "$VIDEO" ]; then
   [ -f "$VIDEO" ] && [ -r "$VIDEO" ] || { echo "error: video not found or unreadable: $VIDEO" >&2; exit 1; }
   VIDEO="$(abspath "$VIDEO")"
 fi
-for photo in ${PHOTOS[@]+"${PHOTOS[@]}"}; do
+PHOTOS=()
+for photo in "$@"; do
   [ -f "$photo" ] || { echo "error: photo not found: $photo" >&2; exit 1; }
+  PHOTOS+=("$(abspath "$photo")")
 done
+
+cd "$(dirname "$0")/.."
+DERIVED="${HALO_SIM_DERIVED:-.build/sim-derived}"
+APP="$DERIVED/Build/Products/Debug-iphonesimulator/Halo.app"
 
 [[ "$(xcode-select -p 2>/dev/null)" == *.app/* ]] || { echo "error: Xcode is required" >&2; exit 1; }
 command -v xcodegen >/dev/null || { echo "error: install xcodegen: brew install xcodegen" >&2; exit 1; }
@@ -43,9 +46,16 @@ if [ ! -d Models/HaloFaceEmbedder.mlmodelc ]; then
 fi
 
 # --- Pick the simulator ----------------------------------------------------------------------
-udid_for() {  # $1: name or UDID -> UDID of an available device
+udid_for() {  # $1: exact name or UDID -> UDID of an available device (newest runtime wins)
+  if [[ "$1" =~ ^[0-9A-Fa-f-]{36}$ ]]; then
+    xcrun simctl list devices available | grep -Fio -- "$1" | head -1
+    return
+  fi
+  # Exact name followed by " (", so "iPhone 17" never matches "iPhone 17 Pro". Runtimes are
+  # listed oldest first: take the last match.
   xcrun simctl list devices available \
-    | grep -F -- "$1" | grep -Eo '\([0-9A-F-]{36}\)' | head -1 | tr -d '()'
+    | awk -v name="$1" '{ line = $0; sub(/^ +/, "", line); if (index(line, name " (") == 1) print line }' \
+    | grep -Eo '\([0-9A-F-]{36}\)' | tail -1 | tr -d '()'
 }
 if [ -n "${HALO_SIM_DEVICE:-}" ]; then
   UDID="$(udid_for "$HALO_SIM_DEVICE")"

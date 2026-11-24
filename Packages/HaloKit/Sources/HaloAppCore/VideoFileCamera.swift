@@ -39,7 +39,10 @@ public enum VideoFileCameraError: Error, Equatable, Sendable, LensCameraUserMess
 ///   frame sink can be swapped at any time. `start()` throws `VideoFileCameraError` for a missing
 ///   or unreadable file.
 /// - `preview` exposes the latest frame as an already-decoded image for the lens preview.
-public final class VideoFileCamera: CameraControlling {
+/// - If the file can no longer be read mid-play, the camera stops itself, clears the preview and
+///   reports `.unreadable` through `setFailureHandler` (the lens ends its session and says why).
+/// - Pacing math lives in `VideoPlaybackPacer` (pure, unit-tested with fake clocks).
+public final class VideoFileCamera: CameraFailureReporting {
     public let url: URL
     /// The latest frame for the preview, converted on the camera queue (only while observed).
     public let preview = LensPreviewFeed()
@@ -47,6 +50,7 @@ public final class VideoFileCamera: CameraControlling {
 
     private let queue = DispatchQueue(label: "halo.camera.video-file", qos: .userInteractive)
     private let box = LensFrameHandlerBox()
+    private let failure = CameraFailureHandlerBox()
     /// Bumped by every start and stop; a playback step from an older generation does nothing.
     private let state = Mutex(PlaybackState())
 
@@ -55,13 +59,25 @@ public final class VideoFileCamera: CameraControlling {
         var isRunning = false
     }
 
-    public init(url: URL, maxFrameRate: Double = 30) {
+    /// Opens one pass over the file. Injected by tests to simulate a file that becomes unreadable.
+    typealias ReaderFactory = @Sendable (Source) throws -> Reader
+    private let openReader: ReaderFactory
+
+    public convenience init(url: URL, maxFrameRate: Double = 30) {
+        self.init(url: url, maxFrameRate: maxFrameRate, openReader: { try Reader(source: $0) })
+    }
+
+    init(url: URL, maxFrameRate: Double = 30, openReader: @escaping ReaderFactory) {
         self.url = url
         self.maxFrameRate = max(1, maxFrameRate)
+        self.openReader = openReader
     }
 
     /// Whether the camera is between `start()` and `stop()`.
     public var isRunning: Bool { state.withLock { $0.isRunning } }
+
+    /// Number of starts and stops that took effect (tests).
+    var generation: Int { state.withLock { $0.generation } }
 
     public func start() async throws {
         if isRunning { return }
@@ -73,7 +89,7 @@ public final class VideoFileCamera: CameraControlling {
             return state.generation
         }
         guard let generation else { return }
-        let playback = Playback(source: source, minimumInterval: 1 / maxFrameRate)
+        let playback = Playback(source: source, minimumInterval: 1 / maxFrameRate, openReader: openReader)
         queue.async { [self] in step(playback, generation: generation) }
     }
 
@@ -89,6 +105,8 @@ public final class VideoFileCamera: CameraControlling {
     }
 
     public func setFrameHandler(_ handler: (@Sendable (VideoFrame) -> Void)?) { box.set(handler) }
+
+    public func setFailureHandler(_ handler: (@Sendable (any Error) -> Void)?) { failure.set(handler) }
 
     /// Runs `body` after everything queued on the camera queue so far (tests).
     func drainQueue() async {
@@ -107,12 +125,16 @@ public final class VideoFileCamera: CameraControlling {
     private func step(_ playback: Playback, generation: Int) {
         guard isCurrent(generation) else { return }
         guard let mediaTime = playback.readNext() else {
-            // The file became unreadable mid-play (or holds no frames): stop quietly.
-            state.withLock { state in
-                guard state.isRunning, state.generation == generation else { return }
+            // The file became unreadable mid-play: stop, blank the preview, tell the lens.
+            let stopped = state.withLock { state -> Bool in
+                guard state.isRunning, state.generation == generation else { return false }
                 state.isRunning = false
                 state.generation += 1
+                return true
             }
+            guard stopped else { return }
+            preview.clear()
+            failure.deliver(VideoFileCameraError.unreadable(url))
             return
         }
         let delay = playback.delay(for: mediaTime, now: Self.hostTime())
@@ -168,7 +190,7 @@ public final class VideoFileCamera: CameraControlling {
         }
         let decodes = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
             queue.async {
-                let reader = try? Reader(source: source)
+                let reader = try? self.openReader(source)
                 continuation.resume(returning: reader?.next() != nil)
             }
         }
@@ -232,47 +254,35 @@ extension VideoFileCamera {
         }
     }
 
-    /// Looping, pacing and frame-rate capping for one `start()` ... `stop()`. Camera queue only;
-    /// `@unchecked Sendable` because it is handed between blocks on that one serial queue.
+    /// One `start()` ... `stop()`: the reader (looping at the end of the file), the frame waiting
+    /// for its presentation time, and the pacer. Camera queue only; `@unchecked Sendable` because
+    /// it is handed between blocks on that one serial queue.
     final class Playback: @unchecked Sendable {
         let source: Source
-        private let minimumInterval: TimeInterval
         private var reader: Reader?
         /// The frame read by `readNext()`, waiting for its presentation time.
         private var pending: CVPixelBuffer?
-        /// Host time and media time of the frame the clock is anchored to (per loop).
-        private var anchor: (host: TimeInterval, media: TimeInterval)?
-        /// Host time the previous frame was scheduled for.
-        private var lastTarget: TimeInterval?
-        private var lastMediaTime: TimeInterval?
+        private var pacer: VideoPlaybackPacer
+        private let openReader: ReaderFactory
 
-        /// Falling further behind than this re-anchors the clock instead of bursting frames.
-        static let maxLag: TimeInterval = 0.25
-
-        init(source: Source, minimumInterval: TimeInterval) {
+        init(source: Source, minimumInterval: TimeInterval, openReader: @escaping ReaderFactory) {
+            self.openReader = openReader
             self.source = source
-            self.minimumInterval = minimumInterval
+            self.pacer = VideoPlaybackPacer(minimumInterval: minimumInterval)
         }
 
         /// Reads the next frame to show into `pending` and returns its media time: skips frames
-        /// closer than the frame-rate cap and loops at the end of the file. nil when the file
-        /// yields no frame even from the start.
+        /// the pacer drops and loops at the end of the file. nil when the file yields no frame
+        /// even from the start (e.g. it became unreadable).
         func readNext() -> TimeInterval? {
             var reopened = false
             while true {
                 if reader == nil {
-                    reader = try? Reader(source: source)
-                    anchor = nil
-                    lastMediaTime = nil
+                    reader = try? openReader(source)
+                    pacer.beginLoop()
                 }
                 if let frame = reader?.next() {
-                    // Small tolerance so a 30 fps file isn't thinned by timestamp rounding.
-                    if let last = lastMediaTime, frame.mediaTime >= last,
-                        frame.mediaTime - last < minimumInterval * 0.9
-                    {
-                        continue
-                    }
-                    lastMediaTime = frame.mediaTime
+                    guard pacer.accept(mediaTime: frame.mediaTime) else { continue }
                     pending = frame.pixelBuffer
                     return frame.mediaTime
                 }
@@ -288,22 +298,67 @@ extension VideoFileCamera {
             return pending
         }
 
-        /// Seconds to wait before showing the frame at `mediaTime`. A loop's first frame follows
-        /// the previous loop's last one by one frame interval.
         func delay(for mediaTime: TimeInterval, now: TimeInterval) -> TimeInterval {
-            let target: TimeInterval
-            if let anchor, mediaTime >= anchor.media,
-                anchor.host + (mediaTime - anchor.media) >= now - Self.maxLag
-            {
-                target = anchor.host + (mediaTime - anchor.media)
-            } else {
-                let start = lastTarget.map { max(now, $0 + minimumInterval) } ?? now
-                // Behind by more than `maxLag`: restart the clock here rather than burst.
-                target = anchor == nil ? start : now
-                anchor = (target, mediaTime)
-            }
-            lastTarget = target
-            return max(0, target - now)
+            pacer.delay(for: mediaTime, now: now)
         }
+    }
+}
+
+/// Real-time pacing and frame-rate capping of a looping video: pure math over host and media
+/// times, unit-tested with fake clocks.
+///
+/// - Frames are shown at their presentation time relative to the first frame of the current pass.
+///   A frame shown late does not shift the clock, so the next one catches up.
+/// - Falling more than `maxLag` behind re-anchors the clock at "now" instead of bursting frames.
+/// - A frame closer than `minimumInterval` (with a 10% tolerance for timestamp rounding) to the
+///   last accepted frame is skipped.
+/// - A new pass starts one `minimumInterval` after the previous pass's last frame.
+struct VideoPlaybackPacer {
+    /// Falling further behind than this re-anchors the clock instead of bursting frames.
+    static let maxLag: TimeInterval = 0.25
+
+    let minimumInterval: TimeInterval
+    /// Host time and media time of the frame the clock is anchored to (per pass).
+    private var anchor: (host: TimeInterval, media: TimeInterval)?
+    /// Host time the previous frame was scheduled for.
+    private var lastTarget: TimeInterval?
+    /// Media time of the last accepted frame in this pass.
+    private var lastMediaTime: TimeInterval?
+
+    init(minimumInterval: TimeInterval) {
+        self.minimumInterval = minimumInterval
+    }
+
+    /// A new pass over the file begins.
+    mutating func beginLoop() {
+        anchor = nil
+        lastMediaTime = nil
+    }
+
+    /// Whether to show the frame at `mediaTime` (false: too close to the last accepted one).
+    mutating func accept(mediaTime: TimeInterval) -> Bool {
+        if let last = lastMediaTime, mediaTime >= last, mediaTime - last < minimumInterval * 0.9 {
+            return false
+        }
+        lastMediaTime = mediaTime
+        return true
+    }
+
+    /// Seconds from `now` until the accepted frame at `mediaTime` should be shown.
+    mutating func delay(for mediaTime: TimeInterval, now: TimeInterval) -> TimeInterval {
+        let target: TimeInterval
+        if let anchor, mediaTime >= anchor.media,
+            anchor.host + (mediaTime - anchor.media) >= now - Self.maxLag
+        {
+            target = anchor.host + (mediaTime - anchor.media)
+        } else {
+            // New pass: one interval after the previous frame. Too far behind, or time went
+            // backwards: restart the clock now.
+            let start = lastTarget.map { max(now, $0 + minimumInterval) } ?? now
+            target = anchor == nil ? start : now
+            anchor = (target, mediaTime)
+        }
+        lastTarget = target
+        return max(0, target - now)
     }
 }

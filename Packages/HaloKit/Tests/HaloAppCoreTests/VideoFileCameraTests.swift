@@ -141,7 +141,10 @@ struct VideoFileCameraTests {
         #expect(log.all.allSatisfy { !$0.onMain })
     }
 
-    @Test func loopsAndPacesInRealTime() async throws {
+    // Real-clock tests assert only order and counts; pacing and the frame-rate cap are covered
+    // with fake clocks in `VideoPlaybackPacerTests`.
+
+    @Test func loopsPastTheEndOfTheFile() async throws {
         // 4 frames at 20 fps: one pass is 0.2 s.
         let url = try await makeSyntheticVideo(frames: 4, fps: 20)
         defer { removeVideo(url) }
@@ -149,30 +152,11 @@ struct VideoFileCameraTests {
         let log = FrameLog()
         camera.setFrameHandler(log.handler)
         try await camera.start()
-        try await waitUntil { log.count >= 10 }  // past the end: it looped
+        try await waitUntil { log.count >= 10 }  // more frames than the file has: it looped
         camera.stop()
         await camera.drainQueue()
         let times = log.all.map(\.timestamp)
         #expect(zip(times, times.dropFirst()).allSatisfy { $0 < $1 })
-        // Paced to the file's 20 fps, not decoded as fast as possible.
-        let span = times[9] - times[0]
-        #expect(span >= 9 * 0.05 * 0.7)
-    }
-
-    @Test func capsTheFrameRate() async throws {
-        // 60 fps file, 15 fps cap: about every fourth frame.
-        let url = try await makeSyntheticVideo(frames: 24, fps: 60)
-        defer { removeVideo(url) }
-        let camera = VideoFileCamera(url: url, maxFrameRate: 15)
-        let log = FrameLog()
-        camera.setFrameHandler(log.handler)
-        try await camera.start()
-        try await waitUntil { log.count >= 5 }
-        camera.stop()
-        await camera.drainQueue()
-        let times = log.all.map(\.timestamp)
-        let gaps = zip(times, times.dropFirst()).map { $1 - $0 }
-        #expect(gaps.allSatisfy { $0 >= 1.0 / 15 * 0.7 })
     }
 
     @Test func stopHaltsDeliveryAndRestartPlaysAgain() async throws {
@@ -198,20 +182,18 @@ struct VideoFileCameraTests {
     }
 
     @Test func startWhileRunningIsANoOp() async throws {
-        let url = try await makeSyntheticVideo(frames: 4, fps: 20)
+        let url = try await makeSyntheticVideo()
         defer { removeVideo(url) }
         let camera = VideoFileCamera(url: url)
         let log = FrameLog()
         camera.setFrameHandler(log.handler)
         try await camera.start()
         try await camera.start()
-        try await waitUntil { log.count >= 6 }
+        // One playback session, not two interleaved ones.
+        #expect(camera.generation == 1)
+        try await waitUntil { log.count >= 2 }
         camera.stop()
-        await camera.drainQueue()
-        // One playback, not two interleaved ones: still paced at about 20 fps.
-        let times = log.all.map(\.timestamp)
-        let gaps = zip(times, times.dropFirst()).map { $1 - $0 }
-        #expect(gaps.allSatisfy { $0 >= 0.05 * 0.6 })
+        #expect(camera.generation == 2)
     }
 
     @Test func removingTheHandlerStopsFramesButNotPlayback() async throws {
