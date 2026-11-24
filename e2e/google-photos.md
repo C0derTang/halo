@@ -55,7 +55,7 @@ Build and run on your iPhone. Never commit `App/Local.xcconfig` (the repo is pub
 
 Use your own photos, or photos of friends **who agreed to it**.
 
-1. **Entry points.** People tab: an "Add from Google Photos" bar sits under the list. Settings >
+1. **Entry points.** People tab: an "Add photos" section at the top of the list. Settings >
    Google Photos: "Google account: Not signed in", "Add from Google Photos", and the line "Only
    photos you pick are downloaded. Faces are found on this device and never uploaded."
 2. **Sign in.** Tap "Add from Google Photos". The status reads "Signing in to Google…" and Google's
@@ -71,16 +71,20 @@ Use your own photos, or photos of friends **who agreed to it**.
    downloaded copies.
 6. **Confirm before recognize.** Before confirming, point the Live Lens at one of those people: no
    name appears. Confirm a group as that person, then point the lens again: the name appears.
-7. **Cancel.** Start another import and tap Cancel while it waits for the picker: the bar goes back
+7. **Cancel.** Start another import and tap Cancel while it waits for the picker: the entry goes back
    to "Add from Google Photos" with no error. Photos already imported stay.
-8. **Busy.** Tap "Add from Google Photos" twice quickly: only one import runs.
-9. **Sign out.** Settings > Google Photos > "Sign out of Google": it now reads "Not signed in".
+8. **Phone locked.** Start an import with many photos and press the side button while it says
+   "Downloading…" or "Finding faces…". Unlock and open Halo: "Import paused (phone locked). Run
+   it again to continue." Run it again: photos already imported are skipped. (Just switching to
+   another app does not stop it; picking in Google Photos always does that.)
+9. **Busy.** Tap "Add from Google Photos" twice quickly: only one import runs.
+10. **Sign out.** Settings > Google Photos > "Sign out of Google": it now reads "Not signed in".
    Imported faces stay. The next import asks you to sign in again.
-10. **Kill switch.** Start an import and, while it waits for the picker, go to Settings > Erase all
+11. **Kill switch.** Start an import and, while it waits for the picker, go to Settings > Erase all
     Halo data. Afterwards: People is empty, "Who is this?" has nothing, Settings shows
     "Not signed in", and the next import asks you to sign in again (tokens and downloaded photos
     were deleted). Nothing reappears later.
-11. **Expired sign-in (optional).** After 7 days in Testing mode, import again: the message
+12. **Expired sign-in (optional).** After 7 days in Testing mode, import again: the message
     "Google sign-in expired. Import again to sign in." appears; importing again signs in.
 
 What you should never see anywhere in the app: a Google URL, a token, a media item id or a file

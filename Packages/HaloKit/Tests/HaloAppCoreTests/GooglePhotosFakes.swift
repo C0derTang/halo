@@ -21,6 +21,9 @@ final class EnvFakeGooglePhotos: GooglePhotosImporting, EnvGooglePhotosAttaching
         /// Keeps writing one face at a time, IGNORING cancellation, until `eraseAll()` runs (the
         /// real importer's eraseAll stops its own work), then throws `CancellationError`.
         case writeLoop
+        /// Waits on `gate` (in the picker), then reports `.scanning` and writes one face every few
+        /// milliseconds until cancelled (cooperatively, like the real importer).
+        case scanUntilCancelled(gate: EnvGate?)
         /// Waits on `gate`, then imports `faces` unconfirmed faces and one cluster suggestion.
         case succeed(faces: Int, gate: EnvGate?)
         case fail(GooglePhotosImportError)
@@ -84,6 +87,21 @@ final class EnvFakeGooglePhotos: GooglePhotosImporting, EnvGooglePhotosAttaching
             }
             log.record("google.returned")
             throw CancellationError()
+        case .scanUntilCancelled(let gate):
+            await gate?.wait()
+            progress(GooglePhotosImportProgress(phase: .scanning, picked: 100))
+            var n = 0
+            do {
+                while true {
+                    n += 1
+                    await write(
+                        Self.face(n, space: services.embedder.space), to: services.store, tag: "write")
+                    try await Task.sleep(for: .milliseconds(3))
+                }
+            } catch {
+                log.record("google.returned")
+                throw CancellationError()
+            }
         case .succeed(let faces, let gate):
             await gate?.wait()
             progress(GooglePhotosImportProgress(phase: .downloading, picked: faces, downloaded: faces))

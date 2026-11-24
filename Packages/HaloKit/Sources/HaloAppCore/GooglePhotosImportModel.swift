@@ -15,6 +15,8 @@ protocol GooglePhotosImportDriving: AnyObject {
 enum GooglePhotosAppError: Error, Equatable {
     /// The face model is missing: nothing could be scanned, so nothing is imported.
     case recognitionUnavailable
+    /// The phone locked (protected data became unavailable): the import was stopped.
+    case pausedForDeviceLock
 }
 
 /// Screen model for "Add from Google Photos" (People tab) and the Google Photos section (Settings).
@@ -58,6 +60,7 @@ public final class GooglePhotosImportModel {
 
     public static let reauthenticationMessage = "Google sign-in expired. Import again to sign in."
     public static let busyMessage = "A photo scan is already running."
+    public static let pausedMessage = "Import paused (phone locked). Run it again to continue."
     public static let notConfiguredMessage =
         "Google Photos isn't set up in this build. Put your Google OAuth client ID in "
         + "App/Local.xcconfig as HALO_GOOGLE_CLIENT_ID and rebuild. Steps: e2e/google-photos.md."
@@ -198,6 +201,7 @@ public final class GooglePhotosImportModel {
         case GooglePhotosImportError.network:
             return "Couldn't reach Google Photos. Check your connection and try again."
         case GooglePhotosImportError.busy: return busyMessage
+        case GooglePhotosAppError.pausedForDeviceLock: return pausedMessage
         case GooglePhotosAppError.recognitionUnavailable:
             return "The face model isn't installed, so photos can't be scanned. Nothing was imported."
         default: return "Google Photos import failed. Photos already imported were kept."

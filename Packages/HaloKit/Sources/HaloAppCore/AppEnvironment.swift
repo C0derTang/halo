@@ -151,6 +151,14 @@ public final class AppEnvironment {
     /// The Google Photos import currently running (at most one). Owned here so forget / erase can
     /// stop it and the Apple Photos scan waits for it.
     @ObservationIgnored var googleTask: Task<GooglePhotosImportProgress, any Error>?
+    /// A Google import was asked for and is waiting (model load, a forget) before its task exists.
+    @ObservationIgnored var googleRunPending = false
+    /// Cancel was tapped while `googleRunPending`: the run does not start.
+    @ObservationIgnored var googleCancelRequested = false
+    /// The running Google import was cancelled because the phone locked.
+    @ObservationIgnored var googlePausedForLock = false
+    /// Device lock signal for the Google import, kept for the app's lifetime.
+    @ObservationIgnored private var protectedDataObserver: ProtectedDataObserver?
     /// The kill switch's `googlePhotos.eraseAll()` failed; retried after the store erase.
     @ObservationIgnored var googleEraseFailed = false
     /// The embedder handed to the Google Photos importer, filled in once the model has loaded.
@@ -236,6 +244,9 @@ public final class AppEnvironment {
         isStoreAvailable = lazyStore.openIfNeeded()
         store.setDelegate(self)
         googleImport.driver = self
+        protectedDataObserver = ProtectedDataObserver { [weak self] in
+            Task { await self?.protectedDataWillBecomeUnavailable() }
+        }
         observeAppLock()
         let googleImport = self.googleImport
         Task { await googleImport.refreshSignInState() }
