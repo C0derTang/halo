@@ -1,6 +1,7 @@
 import CoreGraphics
 import Foundation
 import HaloCore
+import HaloImport
 import HaloUI
 import Synchronization
 import Testing
@@ -296,13 +297,20 @@ import Testing
         #expect(services.embedder.space == envSpace)
     }
 
-    @Test func liveFactoryImportsNothingUntilTheImporterLands() {
-        let importer = AppDependencies.liveGooglePhotos(
-            GooglePhotosServices(
-                config: GooglePhotosConfig(clientID: "synthetic-client.apps.googleusercontent.com"),
-                store: CancellableImportStore(base: EnvNullStore()), detector: EnvFakeDetector(),
-                embedder: DeferredFaceEmbedder()))
-        #expect(!importer.isConfigured)
+    /// The live factory builds the HaloImport importer, configured exactly when the build has a
+    /// client ID. Construction only: nothing here touches the Keychain or the network.
+    @Test func liveFactoryBuildsTheImporterFromTheConfig() {
+        func live(_ clientID: String?) -> any GooglePhotosImporting {
+            AppDependencies.liveGooglePhotos(
+                GooglePhotosServices(
+                    config: GooglePhotosConfig(clientID: clientID),
+                    store: CancellableImportStore(base: EnvNullStore()), detector: EnvFakeDetector(),
+                    embedder: DeferredFaceEmbedder()))
+        }
+        let configured = live("synthetic-client.apps.googleusercontent.com")
+        #expect(configured is GooglePhotosImporter)
+        #expect(configured.isConfigured)
+        #expect(!live(nil).isConfigured)
     }
 }
 
