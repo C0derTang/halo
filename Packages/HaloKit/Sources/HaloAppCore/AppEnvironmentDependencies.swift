@@ -150,11 +150,13 @@ extension AppDependencies {
             makeGooglePhotos: liveGooglePhotos)
     }
 
-    /// The Google Photos importer. MASTER REPLACES this body with the HaloImport importer once it
-    /// has merged (wave 6); `services` carries everything it is built from (config, store, detector,
-    /// embedder, clusterer), so the swap is one line. Until then nothing is imported.
+    /// The Google Photos importer (HaloImport). Not configured (imports nothing) when the build has
+    /// no `HALO_GOOGLE_CLIENT_ID`. `services.store` only permits embedding and cluster writes.
     static func liveGooglePhotos(_ services: GooglePhotosServices) -> any GooglePhotosImporting {
-        NullGooglePhotosImporter()
+        GooglePhotosImporter(
+            clientID: services.config.clientID, store: services.store, detector: services.detector,
+            embedder: services.embedder, clusterer: services.clusterer,
+            isSystemicFailure: services.isSystemicFailure)
     }
 
     private static func liveHookGenerator() -> any MemoryHookGenerating {
