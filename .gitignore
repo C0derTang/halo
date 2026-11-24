@@ -18,3 +18,4 @@ DerivedData/
 *.mlmodelc/
 Models/
 App/Halo/Info.plist
+App/Local.xcconfig

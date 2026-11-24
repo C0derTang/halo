@@ -1,0 +1,5 @@
+// Master-owned. Shared build settings for the Halo app target.
+// Personal values (Apple team, Google OAuth client) go in App/Local.xcconfig, which is gitignored.
+// Copy App/Local.xcconfig.example to App/Local.xcconfig to set them.
+HALO_GOOGLE_CLIENT_ID =
+#include? "Local.xcconfig"

@@ -13,12 +13,15 @@ settings:
   base:
     SWIFT_VERSION: "6.0"
     SWIFT_STRICT_CONCURRENCY: complete
-    DEVELOPMENT_TEAM: ""
     CODE_SIGN_STYLE: Automatic
 targets:
   Halo:
     type: application
     platform: iOS
+    # Halo.xcconfig optionally includes the gitignored Local.xcconfig (team ID, Google client ID).
+    configFiles:
+      Debug: Halo.xcconfig
+      Release: Halo.xcconfig
     sources: [Halo]
     postBuildScripts:
       # Face embedding model fetched by scripts/fetch-models.sh (gitignored, never committed).
@@ -58,6 +61,8 @@ targets:
             LSHandlerRank: Owner
             LSItemContentTypes: [study.paradigm.halo.digest]
         LSSupportsOpeningDocumentsInPlace: false
+        # Google Photos Picker OAuth client ID (empty = Google import hidden). From Local.xcconfig.
+        HaloGoogleClientID: $(HALO_GOOGLE_CLIENT_ID)
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: study.paradigm.halo

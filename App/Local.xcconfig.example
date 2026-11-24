@@ -1,0 +1,8 @@
+// Copy to App/Local.xcconfig (gitignored). Never commit the copy: the repo is public.
+
+// Your Apple team ID (Xcode > Settings > Accounts), for building to a device.
+DEVELOPMENT_TEAM = ABCDE12345
+
+// Google Photos import: the iOS OAuth client ID from Google Cloud Console
+// (APIs & Services > Credentials > OAuth client ID, application type iOS). See e2e/google-photos.md.
+HALO_GOOGLE_CLIENT_ID = 1234567890-abcdefg.apps.googleusercontent.com

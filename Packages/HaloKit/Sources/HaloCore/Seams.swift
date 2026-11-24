@@ -199,3 +199,88 @@ public struct NullMatcher: FaceMatching {
     public init() {}
     public func match(_ vector: [Float], policy: MatchPolicy) -> MatchResult { .unknown }
 }
+
+// MARK: - Google Photos (Photos Picker API)
+
+/// Progress of one Google Photos import. Counts only: no ids, URLs, filenames or pixels.
+public struct GooglePhotosImportProgress: Hashable, Sendable {
+    public enum Phase: Hashable, Sendable {
+        case signingIn, waitingForPicker, downloading, scanning, clustering, finished
+    }
+
+    public var phase: Phase
+    /// Items the user picked (photos only; videos are ignored and counted in `skipped`).
+    public var picked: Int
+    public var downloaded: Int
+    public var facesEmbedded: Int
+    /// Picked items not scanned: videos, already-imported photos, undecodable or failed downloads.
+    public var skipped: Int
+
+    public init(
+        phase: Phase, picked: Int = 0, downloaded: Int = 0, facesEmbedded: Int = 0, skipped: Int = 0
+    ) {
+        self.phase = phase
+        self.picked = picked
+        self.downloaded = downloaded
+        self.facesEmbedded = facesEmbedded
+        self.skipped = skipped
+    }
+}
+
+public enum GooglePhotosImportError: Error, Sendable, Equatable {
+    /// This build has no Google OAuth client ID (`HALO_GOOGLE_CLIENT_ID` in App/Local.xcconfig).
+    case notConfigured
+    /// The user closed Google sign-in or the picker without choosing anything.
+    case cancelled
+    /// The stored grant is gone (revoked, or the 7-day refresh-token limit of a Testing-mode
+    /// consent screen). Tokens were deleted; the next import signs in again.
+    case reauthenticationRequired
+    /// The picker session expired before the user finished choosing.
+    case pickerTimedOut
+    /// Network or Google API failure. Carries no response bodies (they may contain URLs).
+    case network
+    /// Another import or the photo scan is already running.
+    case busy
+}
+
+/// Imports photos the user explicitly picks in Google's own Photos Picker, then finds and embeds
+/// faces ON DEVICE exactly like the Apple Photos scan (new embeddings are unconfirmed suggestions;
+/// invariant 3). Implemented by HaloImport.
+///
+/// - Downloads only picked items, through the Picker API. Never uploads anything, never sends
+///   faces, crops or embeddings anywhere (invariant 2).
+/// - OAuth tokens live only in the Keychain (invariant 5).
+/// - Downloaded photos are kept in the app's Data-Protection `.complete` container only so the
+///   enrollment UI can show face thumbnails; `eraseAll()` deletes them.
+public protocol GooglePhotosImporting: Sendable {
+    /// False when the build has no client ID: the UI hides or disables the entry point.
+    var isConfigured: Bool { get }
+    func isSignedIn() async -> Bool
+    /// Signs in if needed, opens the picker, waits for the selection, downloads the picked photos,
+    /// scans them for faces and refreshes cluster suggestions. Cancellable; partial progress is kept
+    /// (already-imported photos are skipped next time).
+    func importPicked(progress: @escaping @Sendable (GooglePhotosImportProgress) -> Void) async throws
+        -> GooglePhotosImportProgress
+    /// The downloaded photo for a `.googlePhotos` embedding's `sourceRef` (upright), or nil.
+    func cachedImage(for sourceRef: String) async -> CGImage?
+    /// Revokes the grant at Google (best effort) and deletes the tokens. Imported faces stay.
+    func signOut() async
+    /// Kill switch: cancel any import, delete tokens and every downloaded photo. Embeddings are
+    /// erased by the store's `eraseEverything()`.
+    func eraseAll() async throws
+}
+
+/// Safe default: not configured, imports nothing.
+public struct NullGooglePhotosImporter: GooglePhotosImporting {
+    public init() {}
+    public var isConfigured: Bool { false }
+    public func isSignedIn() async -> Bool { false }
+    public func importPicked(progress: @escaping @Sendable (GooglePhotosImportProgress) -> Void)
+        async throws -> GooglePhotosImportProgress
+    {
+        throw GooglePhotosImportError.notConfigured
+    }
+    public func cachedImage(for sourceRef: String) async -> CGImage? { nil }
+    public func signOut() async {}
+    public func eraseAll() async throws {}
+}

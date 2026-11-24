@@ -84,6 +84,9 @@ public struct EmbeddingSpace: Hashable, Codable, Sendable {
 public struct FaceEmbedding: Hashable, Codable, Sendable, Identifiable {
     public enum Source: String, Codable, Sendable {
         case photoLibrary, contactPhoto, liveCapture
+        /// Picked by the user in Google's Photos Picker and downloaded to this device.
+        /// `sourceRef` is `"gphotos:" + PickedMediaItem.id`.
+        case googlePhotos
     }
 
     public var id: UUID
@@ -92,7 +95,7 @@ public struct FaceEmbedding: Hashable, Codable, Sendable, Identifiable {
     public var space: EmbeddingSpace
     public var vector: [Float]
     public var source: Source
-    /// PHAsset.localIdentifier or CNContact.identifier when applicable.
+    /// PHAsset.localIdentifier, CNContact.identifier, or "gphotos:<media item id>" when applicable.
     public var sourceRef: String?
     /// 0...1 capture quality (Vision faceCaptureQuality or equivalent).
     public var quality: Float
