@@ -168,10 +168,17 @@ extension AppDependencies {
         #endif
     }
 
+    /// The back camera on a device. The Simulator has no camera: it plays the demo video named
+    /// by `HALO_DEMO_VIDEO` (`scripts/sim-run.sh`) or explains how to set one. The demo branch is
+    /// compiled out of device builds, which never read that variable.
     @MainActor
     private static func liveCamera() -> (any CameraControlling)? {
         #if os(iOS)
-            LensCameraSource()
+            #if targetEnvironment(simulator)
+                SimulatorCamera.make(environment: ProcessInfo.processInfo.environment)
+            #else
+                LensCameraSource()
+            #endif
         #else
             nil
         #endif

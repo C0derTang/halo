@@ -11,8 +11,8 @@ import SwiftUI
 /// `LensOverlayGeometry` relies on to put each label on the right face.
 struct LensScreen: View {
     @Bindable var model: LensScreenModel
-    /// The session of the app's one camera (`AppEnvironment.captureSession`).
-    let session: AVCaptureSession
+    /// What the app's one camera shows (`AppEnvironment.lensPreview`).
+    let preview: LensPreview
     /// Moments may start / stay open (`AppEnvironment.momentsAllowed`): false on lock,
     /// background, kill switch or lens stop, which dismisses an open sheet.
     let momentsAllowed: Bool
@@ -34,7 +34,7 @@ struct LensScreen: View {
     static let gravity: LensOverlayGeometry.VideoGravity = .resizeAspectFill
 
     var body: some View {
-        CameraPreview(session: session, gravity: Self.gravity, isCapturing: model.isCapturing)
+        previewLayer
             .overlay {
                 LensOverlayView(items: model.items, frame: model.frame, videoGravity: Self.gravity)
             }
@@ -64,6 +64,19 @@ struct LensScreen: View {
                     try? await Task.sleep(for: .milliseconds(500))
                 }
             }
+    }
+
+    /// The camera picture, filling the view with `gravity` like the overlay assumes.
+    @ViewBuilder
+    private var previewLayer: some View {
+        switch preview {
+        case .session(let session):
+            CameraPreview(session: session, gravity: Self.gravity, isCapturing: model.isCapturing)
+        case .frames(let feed):
+            FramePreview(feed: feed, gravity: Self.gravity)
+        case .none:
+            Color.black
+        }
     }
 
     @ViewBuilder
@@ -208,6 +221,90 @@ private struct CameraPreview: UIViewRepresentable {
                 connection.isVideoRotationAngleSupported(90)
             else { return }
             connection.videoRotationAngle = 90
+        }
+    }
+}
+
+/// Decoded frames from a `LensPreviewFeed` (the Simulator demo camera). The image is drawn upright
+/// (its orientation applied) and fitted with the same gravity as `CameraPreview`, so the overlay's
+/// `LensOverlayGeometry` mapping holds. Frames arrive already decoded; this only swaps the image.
+private struct FramePreview: UIViewRepresentable {
+    let feed: LensPreviewFeed
+    let gravity: LensOverlayGeometry.VideoGravity
+
+    func makeUIView(context: Context) -> FrameView {
+        let view = FrameView()
+        view.imageView.contentMode = Self.contentMode(gravity)
+        view.attach(feed)
+        return view
+    }
+
+    func updateUIView(_ view: FrameView, context: Context) {
+        view.imageView.contentMode = Self.contentMode(gravity)
+        view.attach(feed)
+    }
+
+    static func dismantleUIView(_ view: FrameView, coordinator: ()) {
+        view.detach()
+    }
+
+    static func contentMode(_ gravity: LensOverlayGeometry.VideoGravity) -> UIView.ContentMode {
+        switch gravity {
+        case .resizeAspectFill: .scaleAspectFill
+        case .resizeAspect: .scaleAspectFit
+        case .resize: .scaleToFill
+        }
+    }
+
+    /// A container, so the image's size never becomes the view's intrinsic size.
+    final class FrameView: UIView {
+        let imageView = UIImageView()
+        private var feed: LensPreviewFeed?
+
+        override init(frame: CGRect) {
+            super.init(frame: frame)
+            backgroundColor = .black
+            clipsToBounds = true
+            imageView.clipsToBounds = true
+            addSubview(imageView)
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            imageView.frame = bounds
+        }
+
+        func attach(_ newFeed: LensPreviewFeed) {
+            guard feed !== newFeed else { return }
+            feed?.stopObserving()
+            feed = newFeed
+            newFeed.observe { [weak imageView] frame in
+                imageView?.image = frame.map {
+                    UIImage(cgImage: $0.image, scale: 1, orientation: Self.imageOrientation($0.orientation))
+                }
+            }
+        }
+
+        func detach() {
+            feed?.stopObserving()
+            feed = nil
+        }
+
+        static func imageOrientation(_ orientation: CGImagePropertyOrientation) -> UIImage.Orientation {
+            switch orientation {
+            case .up: .up
+            case .upMirrored: .upMirrored
+            case .down: .down
+            case .downMirrored: .downMirrored
+            case .left: .left
+            case .leftMirrored: .leftMirrored
+            case .right: .right
+            case .rightMirrored: .rightMirrored
+            @unknown default: .up
+            }
         }
     }
 }

@@ -340,7 +340,8 @@ public final class LensScreenModel {
         }
     }
 
-    private static func message(for error: any Error) -> String {
+    static func message(for error: any Error) -> String {
+        if let error = error as? any LensCameraUserMessage { return error.userMessage }
         #if os(iOS)
             if let cameraError = error as? CameraSourceError {
                 switch cameraError {
