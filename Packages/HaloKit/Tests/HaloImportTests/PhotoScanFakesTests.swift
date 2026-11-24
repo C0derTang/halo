@@ -31,6 +31,12 @@ actor PhotoScanFakeStore: PeopleStoring, EnrollmentStoring {
 
     func setFailReplaceClusters(_ n: Int) { failReplaceClusters = n }
 
+    /// Drops embeddings directly (e.g. the user rejected a face), without recording a mutation.
+    func removeEmbeddings(ids: [UUID]) {
+        let gone = Set(ids)
+        embeddings.removeAll { gone.contains($0.id) }
+    }
+
     func seed(people: [Person] = [], embeddings: [FaceEmbedding] = [], clusters: [ClusterRecord] = []) {
         for p in people { self.people[p.id] = p }
         self.embeddings += embeddings
