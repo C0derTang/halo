@@ -15,7 +15,8 @@ public struct GooglePhotosImportConfig: Hashable, Sendable {
     public var baseURLLifetime: Duration
     /// Face filter, scan image size and clustering attempts (shared with the Apple Photos scan).
     public var scan: PhotoScanConfig
-    /// Longest wait (real time) for the best-effort picker session DELETE.
+    /// Longest wait (real time) for each best-effort cleanup call: the picker session DELETE and
+    /// the token revoke on sign-out / erase.
     public var sessionCleanupTimeout: Duration
 
     public init(
@@ -158,22 +159,27 @@ public actor GooglePhotosImporter: GooglePhotosImporting {
         exclusiveOperations += 1
         defer { exclusiveOperations -= 1 }
         await cancelCurrentImport()
-        if let authorizer {
-            await authorizer.signOut()
-        } else {
-            try? tokenStore.delete()
-        }
+        try? await deleteTokensAndRevoke()
     }
 
     public func eraseAll() async throws {
         exclusiveOperations += 1
         defer { exclusiveOperations -= 1 }
-        // The import deletes its picker session on the way out, before this resumes.
+        // The import deletes its picker session on the way out (bounded), before this resumes.
         await cancelCurrentImport()
         var firstError: (any Error)?
-        do { try tokenStore.delete() } catch { firstError = error }
-        do { try cache.removeAll() } catch { firstError = firstError ?? error }
+        do { try cache.removeAll() } catch { firstError = error }
+        do { try await deleteTokensAndRevoke() } catch { firstError = firstError ?? error }
         if let firstError { throw firstError }
+    }
+
+    /// Local delete first, then a bounded best-effort revoke at Google.
+    private func deleteTokensAndRevoke() async throws {
+        if let authorizer {
+            try await authorizer.signOut(revokeTimeout: config.sessionCleanupTimeout)
+        } else {
+            try tokenStore.delete()
+        }
     }
 
     // MARK: - Import
@@ -192,6 +198,13 @@ public actor GooglePhotosImporter: GooglePhotosImporting {
         authorizer: GoogleAuthorizer, client: GooglePhotosPickerClient,
         progress: @escaping @Sendable (GooglePhotosImportProgress) -> Void
     ) async throws -> GooglePhotosImportProgress {
+        // Read once per run, before any network call: the app's embedder loads lazily and reports a
+        // placeholder space (dimension 0) until then. Dedupe, scan and clustering all use this value.
+        // There is no "model loading" error case in the seam, so a not-yet-loaded model is `.busy`
+        // (nothing has been touched; try again shortly).
+        let space = embedder.space
+        guard space.dimension > 0 else { throw GooglePhotosImportError.busy }
+
         var state = GooglePhotosImportProgress(phase: .signingIn)
         func publish(_ phase: GooglePhotosImportProgress.Phase) {
             state.phase = phase
@@ -219,15 +232,11 @@ public actor GooglePhotosImporter: GooglePhotosImporting {
             try await presenter.openPicker(pickerURL)
             _ = try await client.waitForSelection(session, clock: clock)
             var listedAt = clock.now
-            var items = try await client.listMediaItems(sessionID: session.id)
+            var items = try await listItems(client: client, sessionID: session.id)
             let photos = items.filter { $0.kind == .photo }
             state.picked = photos.count
             state.skipped = items.count - photos.count
 
-            // Read once per run, as late as possible (after the picker): the app's embedder loads
-            // lazily and reports a placeholder space until then. Dedupe, scan and clustering all
-            // use this one value.
-            let space = embedder.space
             let embedded = try await embeddedItemIDs(space: space)
             // Photos that no longer back an embedding (rejected faces, forgotten people) and are
             // not picked again go; a picked photo downloaded by a cancelled import is reused.
@@ -244,7 +253,7 @@ public actor GooglePhotosImporter: GooglePhotosImporting {
                     toScan.append(photo)
                 } else {
                     if clock.now - listedAt > config.baseURLLifetime {
-                        items = try await client.listMediaItems(sessionID: session.id)
+                        items = try await listItems(client: client, sessionID: session.id)
                         listedAt = clock.now
                     }
                     if try await download(
@@ -292,23 +301,29 @@ public actor GooglePhotosImporter: GooglePhotosImporting {
         client: GooglePhotosPickerClient, sessionID: String
     ) async throws -> Bool {
         var item = items.first { $0.id == photo.id } ?? photo
-        for attempt in 0..<2 {
+        var relisted = false
+        var retriedNetwork = false
+        while true {
             do {
                 let data = try await client.download(item, maxPixelSize: config.downloadPixelSize)
                 try Task.checkCancellation()
                 return (try? cache.store(data, forItemID: photo.id)) ?? false
-            } catch GooglePickerClientError.baseURLExpired where attempt == 0 {
-                items = try await client.listMediaItems(sessionID: sessionID)
+            } catch GooglePickerClientError.baseURLExpired where !relisted {
+                relisted = true
+                items = try await listItems(client: client, sessionID: sessionID)
                 listedAt = clock.now
                 guard let fresh = items.first(where: { $0.id == photo.id }) else { return false }
                 item = fresh
+            } catch GooglePhotosImportError.network where !retriedNetwork {
+                // One retry: a transient failure (e.g. right after resuming) should not drop a photo.
+                retriedNetwork = true
+                try await clock.sleep(for: .seconds(1))
             } catch GooglePickerClientError.baseURLExpired {
                 return false
             } catch GooglePhotosImportError.network {
                 return false
             }
         }
-        return false
     }
 
     /// Detect, filter and embed one cached photo; persists its unassigned embeddings. Returns how
@@ -333,6 +348,8 @@ public actor GooglePhotosImporter: GooglePhotosImporting {
             try? cache.remove(itemID: photo.id)
             return (0, false)
         }
+        // eraseAll / signOut may have cancelled us while detecting: write nothing after that.
+        try Task.checkCancellation()
         try await store.addEmbeddings(result.embeddings)
         return (result.embeddings.count, false)
     }
@@ -350,15 +367,28 @@ public actor GooglePhotosImporter: GooglePhotosImporting {
     /// switch never wait on a slow network. Runs in its own task so it is not cancelled together
     /// with the import it cleans up after.
     private func deleteSession(_ id: String, client: GooglePhotosPickerClient) async {
-        let timeout = config.sessionCleanupTimeout
-        await Task {
-            await withTaskGroup(of: Void.self) { group in
-                group.addTask { try? await client.deleteSession(id: id) }
-                group.addTask { try? await Task.sleep(for: timeout) }
-                await group.next()
-                group.cancelAll()
+        await BestEffort.run(timeout: config.sessionCleanupTimeout) {
+            try? await client.deleteSession(id: id)
+        }
+    }
+
+    /// Lists the picked items, tolerating transient failures (the first request after the app comes
+    /// back from the picker often fails with a lost connection).
+    private func listItems(client: GooglePhotosPickerClient, sessionID: String) async throws
+        -> [PickedMediaItem]
+    {
+        var failures = 0
+        while true {
+            do {
+                return try await client.listMediaItems(sessionID: sessionID)
+            } catch GooglePhotosImportError.network {
+                failures += 1
+                if failures >= GooglePhotosPickerClient.maxConsecutiveNetworkFailures {
+                    throw GooglePhotosImportError.network
+                }
+                try await clock.sleep(for: .seconds(1))
             }
-        }.value
+        }
     }
 
     /// The error `importPicked` throws: cancellation stays `CancellationError`, client-internal

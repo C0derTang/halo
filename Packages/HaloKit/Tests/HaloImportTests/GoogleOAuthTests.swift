@@ -198,6 +198,15 @@ private func query(_ url: URL) -> [String: String] {
         try store.delete()  // deleting nothing is fine
     }
 
+    @Test func tokensNeverPrintTheirValues() {
+        let tokens = GoogleTokens(accessToken: "ya29.SECRET-A", expiresAt: G.now, refreshToken: "1//SECRET-R")
+        var dumped = ""
+        dump(tokens, to: &dumped)
+        for text in [String(describing: tokens), String(reflecting: tokens), "\(tokens)", dumped] {
+            #expect(!text.contains("SECRET"))
+        }
+    }
+
     @Test func corruptTokenItemIsDeletedAndTreatedAsSignedOut() throws {
         let keys = InMemoryKeyStore()
         try keys.write(Data("garbage".utf8), account: KeychainGoogleTokenStore.account)

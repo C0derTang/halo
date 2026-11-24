@@ -116,7 +116,7 @@ private func authorizer(
     @Test func signOutDeletesTokensAndRevokesTheRefreshToken() async throws {
         let google = FakeGoogle()
         let (auth, _, keys) = authorizer(google)
-        await auth.signOut()
+        try await auth.signOut(revokeTimeout: .seconds(3))
         #expect(keys.isEmpty)
         let revoke = try #require(google.requests.all.first)
         #expect(revoke.url?.absoluteString == "https://oauth2.googleapis.com/revoke")
@@ -129,7 +129,29 @@ private func authorizer(
         let auth = GoogleAuthorizer(
             oauth: GoogleOAuth(clientID: G.clientID)!, transport: transport, tokenStore: store,
             presenter: FakePresenter(), now: { G.now })
-        await auth.signOut()
+        try await auth.signOut(revokeTimeout: .seconds(3))
+        #expect(keys.isEmpty)
+    }
+
+    @Test func slowRevokeIsBoundedAndTokensAreGoneFirst() async throws {
+        let google = FakeGoogle()
+        google.with { $0.hangRevoke = true }  // would take 30 s
+        let (auth, _, keys) = authorizer(google)
+        let begin = ContinuousClock.now
+        try await auth.signOut(revokeTimeout: .milliseconds(200))
+        #expect(ContinuousClock.now - begin < .seconds(10))
+        #expect(keys.isEmpty)
+    }
+
+    @Test func cancelledSignInNeverOpensTheBrowser() async throws {
+        let presenter = FakePresenter(.approve)
+        let (auth, _, keys) = authorizer(FakeGoogle(), tokens: nil, presenter: presenter)
+        let task = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            try await auth.signIn()
+        }
+        await #expect(throws: CancellationError.self) { try await task.value }
+        #expect(presenter.authURLs.all.isEmpty)
         #expect(keys.isEmpty)
     }
 }

@@ -27,6 +27,17 @@ public struct GoogleTokens: Codable, Hashable, Sendable {
     }
 }
 
+/// Printing, `dump` and debugger summaries never show the token values.
+extension GoogleTokens: CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+    public var description: String { "GoogleTokens(<redacted>, expiresAt: \(expiresAt))" }
+    public var debugDescription: String { description }
+    public var customMirror: Mirror {
+        Mirror(
+            self,
+            children: ["accessToken": "<redacted>", "expiresAt": expiresAt, "refreshToken": "<redacted>"])
+    }
+}
+
 /// A PKCE verifier and its S256 challenge (RFC 7636).
 public struct PKCE: Hashable, Sendable {
     /// 43...128 characters of `[A-Za-z0-9-._~]`.

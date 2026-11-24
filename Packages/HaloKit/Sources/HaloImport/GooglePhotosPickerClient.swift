@@ -46,12 +46,15 @@ public struct PickerSession: Hashable, Sendable {
     }
 
     /// The picker page to open: `pickerUri` + `/autoclose`, so it closes itself when done.
+    /// The docs do not pin the picker host ("Google Photos on the web"), so a Google https host gets
+    /// `/autoclose` and any other https URI is opened as given rather than failing. It is only ever
+    /// opened in Safari / Google Photos, never fetched by us, and carries no token. nil for non-https.
     public var autocloseURL: URL? {
-        // Opened in Safari / Google Photos, never fetched by us; still only ever a Google https page.
         guard let pickerURI, pickerURI.scheme?.lowercased() == "https",
-            let host = pickerURI.host?.lowercased(), host == "google.com" || host.hasSuffix(".google.com")
+            let host = pickerURI.host?.lowercased()
         else { return nil }
-        return URL(string: pickerURI.absoluteString + "/autoclose")
+        guard host == "google.com" || host.hasSuffix(".google.com") else { return pickerURI }
+        return URL(string: pickerURI.absoluteString + "/autoclose") ?? pickerURI
     }
 }
 
@@ -112,14 +115,28 @@ struct GooglePhotosPickerClient: Sendable {
     {
         let deadline = clock.now.advanced(by: initial.timeoutIn ?? .seconds(1800))
         var current = initial
+        var consecutiveFailures = 0
         while !current.mediaItemsSet {
             if let left = current.timeoutIn, left <= .zero { throw GooglePhotosImportError.pickerTimedOut }
             if clock.now >= deadline { throw GooglePhotosImportError.pickerTimedOut }
             try await clock.sleep(for: Self.clampedPollInterval(current.pollInterval))
-            current = try await session(id: initial.id)
+            do {
+                current = try await session(id: initial.id)
+                consecutiveFailures = 0
+            } catch GooglePhotosImportError.network {
+                // Opening the picker backgrounds the app; the poll in flight when iOS suspends it
+                // often fails on resume (connection lost). Keep polling until the deadline.
+                consecutiveFailures += 1
+                if consecutiveFailures >= Self.maxConsecutiveNetworkFailures {
+                    throw GooglePhotosImportError.network
+                }
+            }
         }
         return current
     }
+
+    /// Transient failures in a row tolerated by the poll loop (and the importer's retries).
+    static let maxConsecutiveNetworkFailures = 5
 
     // MARK: Media items
 
@@ -203,7 +220,8 @@ struct GooglePhotosPickerClient: Sendable {
         guard let text, text.hasSuffix("s"), let seconds = Double(text.dropLast()), seconds.isFinite,
             seconds >= 0
         else { return nil }
-        return .milliseconds(Int64((seconds * 1000).rounded()))
+        // Clamped to a day so a hostile value ("1e20s") cannot overflow the Int64 conversion.
+        return .milliseconds(Int64((min(seconds, 86_400) * 1000).rounded()))
     }
 
     static func session(from data: Data) throws -> PickerSession {

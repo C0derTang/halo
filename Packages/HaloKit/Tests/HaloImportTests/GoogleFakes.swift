@@ -120,6 +120,14 @@ final class FakeGoogle: HTTPTransport, Sendable {
         var deletedSessions: [String] = []
         /// The session DELETE hangs until its task is cancelled (a very slow network).
         var hangDelete = false
+        /// The token revoke hangs until its task is cancelled.
+        var hangRevoke = false
+        /// The next this-many session polls / list calls fail like a connection lost on resume.
+        var failPolls = 0
+        var failLists = 0
+        /// Per item: the next this-many downloads fail with a lost connection.
+        var failDownloads: [String: Int] = [:]
+        var revoked: [String] = []
         var createdSessions = 0
         var downloads: [String] = []
         var downloadURLs: [URL] = []
@@ -136,6 +144,15 @@ final class FakeGoogle: HTTPTransport, Sendable {
     }
 
     func with<T>(_ body: (inout State) -> T) -> T { state.withLock { body(&$0) } }
+
+    /// Decrements a failure counter; true when this call should fail.
+    private func consume(_ counter: WritableKeyPath<State, Int>) -> Bool {
+        with { s in
+            guard s[keyPath: counter] > 0 else { return false }
+            s[keyPath: counter] -= 1
+            return true
+        }
+    }
 
     func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         requests.append(request)
@@ -161,11 +178,15 @@ final class FakeGoogle: HTTPTransport, Sendable {
                 ])
             )
         case ("oauth2.googleapis.com", "POST", "/revoke"):
+            if with({ $0.hangRevoke }) { try await Task.sleep(for: .seconds(30)) }
+            let token = GoogleFixture.formFields(request)["token"] ?? ""
+            with { $0.revoked.append(token) }
             return (200, Data())
         case ("photospicker.googleapis.com", "POST", "/v1/sessions"):
             with { $0.createdSessions += 1 }
             return (200, sessionJSON(set: false))
         case ("photospicker.googleapis.com", "GET", "/v1/sessions/s1"):
+            if consume(\.failPolls) { throw URLError(.networkConnectionLost) }
             let set = with { s -> Bool in
                 s.polls += 1
                 return s.polls > s.pollsBeforeSet
@@ -176,6 +197,7 @@ final class FakeGoogle: HTTPTransport, Sendable {
             with { $0.deletedSessions.append("s1") }
             return (200, Data("{}".utf8))
         case ("photospicker.googleapis.com", "GET", "/v1/mediaItems"):
+            if consume(\.failLists) { throw URLError(.networkConnectionLost) }
             return (200, listPage(url))
         case ("lh3.googleusercontent.com", "GET", _):
             return try await download(url)
@@ -238,6 +260,12 @@ final class FakeGoogle: HTTPTransport, Sendable {
         if hang {
             try await Task.sleep(for: .seconds(30))
         }
+        let fail = with { s -> Bool in
+            guard let n = s.failDownloads[id], n > 0 else { return false }
+            s.failDownloads[id] = n - 1
+            return true
+        }
+        if fail { throw URLError(.networkConnectionLost) }
         guard let item, valid else { return (403, Data()) }
         with { $0.downloads.append(id) }
         return (200, GoogleFixture.png(width: item.width, height: item.height))
@@ -295,7 +323,8 @@ final class FakeClock: GoogleImportClock, Sendable {
     }
 }
 
-/// An embedder whose `space` is a placeholder until `load()`, like the app's lazy model wrapper.
+/// An embedder whose `space` is a placeholder (dimension 0) until `load()`, like the app's lazy
+/// model wrapper.
 final class LazySpaceEmbedder: FaceEmbedder, Sendable {
     private let inner = SyntheticEmbedder()
     private let loaded = Mutex(false)

@@ -31,15 +31,22 @@ private func client(_ google: FakeGoogle, pageSize: Int = 100) -> GooglePhotosPi
         #expect(picking?["maxItemCount"] as? String == "200")
     }
 
-    @Test func pickerURIOutsideGoogleIsNeverOpened() {
-        let foreign = PickerSession(
-            id: "s", pickerURI: URL(string: "https://evil.example/picker"), pollInterval: .seconds(5),
-            timeoutIn: nil, mediaItemsSet: false)
-        #expect(foreign.autocloseURL == nil)
-        let plain = PickerSession(
-            id: "s", pickerURI: URL(string: "http://photos.google.com/picker/s"), pollInterval: .seconds(5),
-            timeoutIn: nil, mediaItemsSet: false)
-        #expect(plain.autocloseURL == nil)
+    @Test func pickerURIHandling() {
+        func session(_ uri: String) -> PickerSession {
+            PickerSession(
+                id: "s", pickerURI: URL(string: uri), pollInterval: .seconds(5), timeoutIn: nil,
+                mediaItemsSet: false)
+        }
+        // The docs do not pin the host: Google hosts get /autoclose, any other https URI opens as is.
+        #expect(
+            session("https://google.com/p/s").autocloseURL?.absoluteString
+                == "https://google.com/p/s/autoclose")
+        #expect(
+            session("https://other.example/picker").autocloseURL?.absoluteString
+                == "https://other.example/picker")
+        // Never a non-https page.
+        #expect(session("http://photos.google.com/picker/s").autocloseURL == nil)
+        #expect(session("javascript:alert(1)").autocloseURL == nil)
     }
 
     @Test func durationsAreParsed() {
@@ -49,6 +56,10 @@ private func client(_ google: FakeGoogle, pageSize: Int = 100) -> GooglePhotosPi
         #expect(GooglePhotosPickerClient.duration("0s") == .zero)
         #expect(GooglePhotosPickerClient.duration("5") == nil)
         #expect(GooglePhotosPickerClient.duration(nil) == nil)
+        // Hostile values are clamped, never trapping on the Int64 conversion.
+        #expect(GooglePhotosPickerClient.duration("1e20s") == .seconds(86_400))
+        #expect(GooglePhotosPickerClient.duration("-5s") == nil)
+        #expect(GooglePhotosPickerClient.duration("infs") == nil)
     }
 
     // MARK: Poll loop (fake clock)
@@ -88,6 +99,41 @@ private func client(_ google: FakeGoogle, pageSize: Int = 100) -> GooglePhotosPi
             _ = try await c.waitForSelection(session, clock: clock)
         }
         #expect(google.with { $0.polls } == 1)
+    }
+
+    @Test func pollSurvivesTransientFailuresAfterResume() async throws {
+        let google = FakeGoogle(pollsBeforeSet: 1)
+        let clock = FakeClock()
+        let c = client(google)
+        let session = try await c.createSession(maxItemCount: 200)
+        google.with { $0.failPolls = 2 }  // e.g. the poll in flight when iOS suspended the app
+        let done = try await c.waitForSelection(session, clock: clock)
+        #expect(done.mediaItemsSet)
+        #expect(clock.sleeps.all.count == 4)  // 2 failed polls, 1 not set, 1 set
+    }
+
+    @Test func pollGivesUpAfterFiveFailuresInARow() async throws {
+        let google = FakeGoogle(pollsBeforeSet: 1)
+        let clock = FakeClock()
+        let c = client(google)
+        let session = try await c.createSession(maxItemCount: 200)
+        google.with { $0.failPolls = 5 }
+        await #expect(throws: GooglePhotosImportError.network) {
+            _ = try await c.waitForSelection(session, clock: clock)
+        }
+        #expect(clock.sleeps.all.count == 5)
+    }
+
+    @Test func pollFailuresStillEndAtTheDeadline() async throws {
+        let google = FakeGoogle(pollsBeforeSet: 10_000)
+        google.with { $0.timeoutIn = "12s" }
+        let clock = FakeClock()
+        let c = client(google)
+        let session = try await c.createSession(maxItemCount: 200)
+        google.with { $0.failPolls = 2 }
+        await #expect(throws: GooglePhotosImportError.pickerTimedOut) {
+            _ = try await c.waitForSelection(session, clock: clock)
+        }
     }
 
     @Test func pollIntervalIsClamped() {

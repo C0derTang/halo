@@ -60,6 +60,23 @@ private final class RedirectGuard: NSObject, URLSessionTaskDelegate, Sendable {
     }
 }
 
+/// Cleanup calls (session DELETE, token revoke) that must neither block the kill switch on a slow
+/// network nor be cancelled along with the import they clean up after.
+enum BestEffort {
+    /// Runs `operation` in a fresh task (not cancelled with the caller) and returns once it finishes
+    /// or `timeout` (real time) passes, whichever is first; the operation is then cancelled.
+    static func run(timeout: Duration, _ operation: @escaping @Sendable () async -> Void) async {
+        await Task {
+            await withTaskGroup(of: Void.self) { group in
+                group.addTask { await operation() }
+                group.addTask { try? await Task.sleep(for: timeout) }
+                await group.next()
+                group.cancelAll()
+            }
+        }.value
+    }
+}
+
 /// Monotonic time + sleep for the picker poll loop and baseUrl expiry, injectable for tests.
 public protocol GoogleImportClock: Sendable {
     var now: ContinuousClock.Instant { get }

@@ -133,10 +133,32 @@ private func downloadStarted(_ google: FakeGoogle, id: String, hang: Bool) -> As
             tokenStore: tokenStore, cacheDirectory: dir,
             config: GooglePhotosImportConfig(scan: PhotoScanConfig(maxPixelSize: 2048)), clock: FakeClock(),
             now: { G.now })
+        // Model not loaded yet: refused before any request, cache and store untouched.
+        try GooglePhotosCache(directory: dir).store(G.png(width: 64, height: 64), forItemID: "old")
+        await #expect(throws: GooglePhotosImportError.busy) { _ = try await importer.importPicked { _ in } }
+        #expect(google.requests.all.isEmpty)
+        #expect(GooglePhotosCache(directory: dir).contains(itemID: "old"))
+        #expect(await store.replaceClustersCalls == 0)
+
         lazy.load()
         let result = try await importer.importPicked { _ in }
         #expect(result.facesEmbedded == 1)
         #expect(await store.embeddings.map(\.space) == [SyntheticEmbedder().space])
+    }
+
+    @Test func importSurvivesTransientFailuresAfterReturningFromThePicker() async throws {
+        let h = Harness(items: [photo(0), photo(2)], faces: standardFaces)
+        defer { h.cleanUp() }
+        h.google.with {
+            $0.failPolls = 2
+            $0.failLists = 1
+            $0.failDownloads = ["m0": 1]
+        }
+        let result = try await h.importer.importPicked { _ in }
+        #expect(result.downloaded == 2)
+        #expect(result.facesEmbedded == 3)
+        #expect(result.skipped == 0)
+        #expect(h.google.with { $0.failPolls + $0.failLists + $0.failDownloads.values.reduce(0, +) } == 0)
     }
 
     @Test func nothingIsUploadedAndOnlyGoogleIsContacted() async throws {
@@ -339,8 +361,10 @@ private func downloadStarted(_ google: FakeGoogle, id: String, hang: Bool) -> As
         let h = Harness(items: [photo(0), photo(2), photo(4)], detector: detector)
         defer { h.cleanUp() }
         await #expect(throws: CancellationError.self) { _ = try await h.importer.importPicked { _ in } }
-        // m0 and m2 were scanned (m2's detection cancelled the run after returning); m4 was not.
-        #expect(Set(await h.store.embeddings.compactMap(\.sourceRef)) == ["gphotos:m0", "gphotos:m2"])
+        // m0 was persisted. m2's detection cancelled the run: its faces are not written after the
+        // cancellation (eraseAll relies on that); m4 was never scanned.
+        #expect(await h.store.embeddings.compactMap(\.sourceRef).allSatisfy { $0 == "gphotos:m0" })
+        #expect(await h.store.embeddings.count == 1)
         #expect(detector.sizes.all.count == 2)
         #expect(h.google.with { $0.deletedSessions } == ["s1"])
         #expect(await h.store.replaceClustersCalls == 0)
@@ -377,7 +401,10 @@ private func downloadStarted(_ google: FakeGoogle, id: String, hang: Bool) -> As
         let h = Harness(
             items: [photo(0), photo(2)], faces: standardFaces, sessionCleanupTimeout: .milliseconds(200))
         defer { h.cleanUp() }
-        h.google.with { $0.hangDelete = true }
+        h.google.with {
+            $0.hangDelete = true
+            $0.hangRevoke = true
+        }
         let started = downloadStarted(h.google, id: "m2", hang: true)
         let task = Task { try await h.importer.importPicked { _ in } }
         for await _ in started { break }
@@ -398,6 +425,7 @@ private func downloadStarted(_ google: FakeGoogle, id: String, hang: Bool) -> As
         #expect(h.dirExists && !h.keys.isEmpty)
         try await h.importer.eraseAll()
         #expect(!h.dirExists && h.keys.isEmpty)
+        #expect(h.google.with { $0.revoked } == ["refresh-0"])  // revoked at Google, best effort
         #expect(await h.importer.cachedImage(for: "gphotos:m0") == nil)
         // Embeddings are the store's to erase (eraseEverything), not ours.
         #expect(await h.store.embeddings.count == 1)

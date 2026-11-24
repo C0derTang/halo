@@ -32,6 +32,7 @@ actor GoogleAuthorizer: GoogleAccessTokenProviding {
 
     /// Browser sign-in, `state` check, code exchange; saves the tokens unless cancelled meanwhile.
     func signIn() async throws {
+        try Task.checkCancellation()
         let pkce = PKCE()
         let state = PKCE.randomURLSafe(byteCount: 32)
         let callback: URL
@@ -90,12 +91,18 @@ actor GoogleAuthorizer: GoogleAccessTokenProviding {
         return refreshed
     }
 
-    /// Deletes the tokens, then revokes the grant at Google (best effort; never throws).
-    func signOut() async {
+    /// Deletes the tokens locally first, then revokes the grant at Google: best effort, bounded by
+    /// `revokeTimeout`, not cancelled with the caller. Throws only if the local delete failed.
+    func signOut(revokeTimeout: Duration) async throws {
         let tokens = (try? tokenStore.load()) ?? nil
-        try? tokenStore.delete()
-        guard let tokens else { return }
-        _ = try? await transport.send(oauth.revokeRequest(token: tokens.refreshToken))
+        var deleteError: (any Error)?
+        do { try tokenStore.delete() } catch { deleteError = error }
+        if let tokens {
+            let request = oauth.revokeRequest(token: tokens.refreshToken)
+            let transport = transport
+            await BestEffort.run(timeout: revokeTimeout) { _ = try? await transport.send(request) }
+        }
+        if let deleteError { throw deleteError }
     }
 
     private func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
